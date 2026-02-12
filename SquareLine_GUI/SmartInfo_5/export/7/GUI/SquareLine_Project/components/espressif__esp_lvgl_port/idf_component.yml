@@ -1,0 +1,13 @@
+dependencies:
+  idf:
+    version: '>=4.4'
+  lvgl/lvgl:
+    public: true
+    version: '>=9.1,<10'
+description: ESP LVGL port
+repository: git://github.com/espressif/esp-bsp.git
+repository_info:
+  commit_sha: b5f68c366b8c0d5fdff4cb494b005a444e203fcf
+  path: components/esp_lvgl_port
+url: https://github.com/espressif/esp-bsp/tree/master/components/esp_lvgl_port
+version: 2.2.0

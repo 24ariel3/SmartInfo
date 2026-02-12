@@ -1,0 +1,10 @@
+menu "Stock Monitor Configuration"
+
+    config FINNHUB_API_KEY
+        string "Finnhub API Key"
+        default ""
+        help
+            API Key for Finnhub.io stock data service.
+            Get your free key at https://finnhub.io/
+            
+endmenu
