@@ -50,6 +50,31 @@ void mem_info(void) {
   printf("-----------------------\n");
 }
 
+#include "driver/i2c.h"
+
+static void i2c_scanner() {
+  ESP_LOGI(TAG, ">> I2C Scanner starting...");
+  int devices_found = 0;
+  for (int i = 1; i < 127; i++) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (i << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret =
+        i2c_master_cmd_begin(BSP_I2C_NUM, cmd, 50 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    if (ret == ESP_OK) {
+      ESP_LOGI(TAG, ">> Found I2C device at address 0x%02x", i);
+      devices_found++;
+    }
+  }
+  if (devices_found == 0) {
+    ESP_LOGW(TAG, ">> No I2C devices found!");
+  } else {
+    ESP_LOGI(TAG, ">> I2C Scan complete. Found %d devices.", devices_found);
+  }
+}
+
 void app_main(void) {
   mem_info();
   // Reconfigure Task Watchdog to 10 seconds
@@ -82,8 +107,11 @@ void app_main(void) {
   // Initialize BSP (GPIOs, SPI, I2C)
   ESP_ERROR_CHECK(bsp_init());
 
+  // Run I2C Scanner
+  i2c_scanner();
+
   // Initialize BSEC Helper
-  bsec_wrapper_init();
+  bsec_wrapper_init(); // This creates the mutex
 
   // Start the BSEC processing task
   bsec_start_task();

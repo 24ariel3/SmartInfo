@@ -5,8 +5,10 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 #include <stdlib.h>
 #include <string.h>
+
 
 // BSEC and BME68x headers
 #include "bme68x.h"
@@ -93,7 +95,12 @@ void bsec_save_state(void) {
 // #define I2C_MASTER_TX_BUF_DISABLE 0
 // #define I2C_MASTER_RX_BUF_DISABLE 0
 
-#define BME680_I2C_ADDR 0x77 // Or 0x76
+#ifdef CONFIG_BME680_I2C_ADDR
+#define BME680_I2C_ADDR CONFIG_BME680_I2C_ADDR
+#else
+#define BME680_I2C_ADDR 0x77 // Default fallback
+#endif
+
 #define TOTAL_VIRTUAL_SENSORS 14
 #define BSEC_TASK_STACK_SIZE 6144
 #define BSEC_TASK_PRIORITY 5
