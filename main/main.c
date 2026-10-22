@@ -3,6 +3,7 @@
  */
 
 #include "bsec_integration.h"
+#include "battery.h"
 #include "bsp.h"
 #include "display.h"
 #include "esp_chip_info.h"
@@ -106,6 +107,7 @@ void app_main(void) {
 
   // Initialize BSP (GPIOs, SPI, I2C)
   ESP_ERROR_CHECK(bsp_init());
+  ESP_ERROR_CHECK(battery_init());
 
   // Run I2C Scanner
   i2c_scanner();
