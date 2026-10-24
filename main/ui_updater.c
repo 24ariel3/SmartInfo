@@ -4,6 +4,7 @@
  */
 
 #include "ui_updater.h"
+#include "battery.h"
 #include "bsec_integration.h"
 #include "display.h"
 #include "esp_log.h"
@@ -411,6 +412,26 @@ static void ui_update_timer_cb(lv_timer_t *timer) {
       update_sensor_ui(&sensor_data);
       last_sensor_ts = current_sensor_ts;
       ESP_LOGD(TAG, "Sensor UI updated (TS: %lld)", current_sensor_ts);
+    }
+  }
+
+  // Read battery status every 10 seconds using the existing UI timer.
+  static int64_t last_battery_sample_us = 0;
+  int64_t now = esp_timer_get_time();
+  if (s_first_run || now - last_battery_sample_us >= 10LL * 1000000) {
+    last_battery_sample_us = now;
+    int battery_mv;
+    int battery_percent;
+    if (battery_read(&battery_mv, &battery_percent) == ESP_OK) {
+      char battery_buf[16];
+      if (ui_LabelSettingsBatteryLevelPercentage) {
+        snprintf(battery_buf, sizeof(battery_buf), "%d%%", battery_percent);
+        lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, battery_buf);
+      }
+      if (ui_LabelSettingsBatteryLevelRaw) {
+        snprintf(battery_buf, sizeof(battery_buf), "%d mV", battery_mv);
+        lv_label_set_text(ui_LabelSettingsBatteryLevelRaw, battery_buf);
+      }
     }
   }
 
@@ -1087,6 +1108,11 @@ static void ui_event_ButtonWeatherOK(lv_event_t *e) {
 
 void ui_updater_init(void) {
   ESP_LOGI(TAG, "Initializing UI updater timer");
+
+  if (ui_LabelSettingsBatteryLevelPercentage)
+    lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, "--");
+  if (ui_LabelSettingsBatteryLevelRaw)
+    lv_label_set_text(ui_LabelSettingsBatteryLevelRaw, "--");
 
   // Initialize stock symbol labels from NVS (before WiFi)
   char sym1[16] = {0};
