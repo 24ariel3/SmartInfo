@@ -6,6 +6,7 @@
 #include "battery.h"
 #include "bsp.h"
 #include "display.h"
+#include "device_server.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -152,6 +153,16 @@ void app_main(void) {
   }
 
   ESP_LOGI(TAG, "UI Initialized - All updates handled by LVGL timer");
+
+  ret = device_server_init();
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Device server unavailable: %s", esp_err_to_name(ret));
+  }
+  vTaskDelay(pdMS_TO_TICKS(30000));
+  int64_t sensor_ts = bsec_get_last_updated_time();
+  bool healthy = ret == ESP_OK && display_get_handle() != NULL && sensor_ts > 0 &&
+                 esp_timer_get_time() - sensor_ts <= 10LL * 1000000;
+  ESP_ERROR_CHECK(device_server_confirm_boot(healthy));
 
   // Main task has nothing else to do - it can sleep or be deleted
   // The UI updates are now handled by the LVGL timer inside the display task

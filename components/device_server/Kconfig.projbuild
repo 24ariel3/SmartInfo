@@ -1,0 +1,9 @@
+menu "Device Server"
+    config DEVICE_SERVER_AUTH_TOKEN
+        string "Local HTTP bearer token (64 hexadecimal characters)"
+        default ""
+        help
+            Generate a token with Python: import secrets; print(secrets.token_hex(32)).
+            Keep it in local sdkconfig. An empty or invalid token disables the server.
+            HTTP is unencrypted; use this service only on a trusted local network.
+endmenu

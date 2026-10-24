@@ -2,13 +2,49 @@
 
 #include <assert.h>
 
+#include "bsp.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 
+/*
+ * Battery sense wiring: ESP32 DevKit V1 and 18650 shield V8.
+ * R1/R2/C1 below are external parts added for sensing.
+ *
+ * Shield BAT+ -- R1 100 kOhm --+-- white wire -- GPIO34 (BSP_BAT_SENSE)
+ *                              |
+ *                              +-- R2 100 kOhm -- GND
+ *                              |
+ *                              +-- C1 100 nF ---- GND
+ *
+ * Tap BAT+ at the PCB solder lug of the battery holder's positive metal
+ * contact (marked '+'). Confirm continuity with the positive contact with
+ * cells and USB power removed. Do not use the regulated 3 V/5 V output
+ * or connect raw BAT+ directly to GPIO34.
+ *
+ * GND is one common return for R2, C1, the ESP32 and shield output:
+ * - ESP32: use GND between GPIO13 and VIN on the 30-pin DevKit V1.
+ *   With USB pointing down and components facing you, this is the left
+ *   header's second pin from the bottom. Either ESP32 GND pin is equivalent.
+ * - Shield: use a pad marked GND beside a 5 V output, shared with the
+ *   ESP32 power connection. Use output GND, not the holder's negative lug.
+ *
+ * R1 and R2: 100 kOhm each, 1%. C1: 100 nF (0.1 uF, marking 104),
+ * ceramic X7R, rated at least 10 V, in parallel with R2. Place C1 close
+ * to GPIO34 with short leads to GND; 15 pF is not a substitute.
+ * The ADC filter capacitor follows Espressif's hardware guidelines:
+ * https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32/schematic-checklist.html#adc
+ *
+ * A 4.2 V cell gives 2.1 V at GPIO34; battery_read() scales it by two.
+ * Allow about 50 ms after the divider receives power for C1 to settle.
+ * Before connecting GPIO34, verify the divider midpoint against GND
+ * with a multimeter. The capacitor does not prevent off-state back-power.
+ */
+
 static const char *TAG = "BATTERY";
 static adc_oneshot_unit_handle_t battery_adc;
+static adc_channel_t battery_channel;
 static adc_cali_handle_t battery_calibration;
 
 esp_err_t battery_read(int *voltage_mv, int *percent) {
@@ -18,7 +54,7 @@ esp_err_t battery_read(int *voltage_mv, int *percent) {
   int raw_sum = 0;
   for (int i = 0; i < 32; ++i) {
     int raw;
-    esp_err_t err = adc_oneshot_read(battery_adc, ADC_CHANNEL_6, &raw);
+    esp_err_t err = adc_oneshot_read(battery_adc, battery_channel, &raw);
     if (err != ESP_OK) return err;
     raw_sum += raw;
   }
@@ -37,15 +73,17 @@ esp_err_t battery_read(int *voltage_mv, int *percent) {
 
 esp_err_t battery_init(void) {
   // shortcut: the always-on 100k/100k divider can back-power an unpowered ESP32; switch it if full-off isolation is needed.
-  adc_oneshot_unit_init_cfg_t adc_config = {.unit_id = ADC_UNIT_1};
+  adc_unit_t adc_unit;
+  ESP_ERROR_CHECK(adc_oneshot_io_to_channel(BSP_BAT_SENSE, &adc_unit, &battery_channel));
+  adc_oneshot_unit_init_cfg_t adc_config = {.unit_id = adc_unit};
   ESP_ERROR_CHECK(adc_oneshot_new_unit(&adc_config, &battery_adc));
   adc_oneshot_chan_cfg_t channel_config = {
       .atten = ADC_ATTEN_DB_12,
       .bitwidth = ADC_BITWIDTH_DEFAULT,
   };
-  ESP_ERROR_CHECK(adc_oneshot_config_channel(battery_adc, ADC_CHANNEL_6, &channel_config));
+  ESP_ERROR_CHECK(adc_oneshot_config_channel(battery_adc, battery_channel, &channel_config));
   adc_cali_line_fitting_config_t calibration_config = {
-      .unit_id = ADC_UNIT_1,
+      .unit_id = adc_unit,
       .atten = ADC_ATTEN_DB_12,
       .bitwidth = ADC_BITWIDTH_DEFAULT,
       .default_vref = 1100,

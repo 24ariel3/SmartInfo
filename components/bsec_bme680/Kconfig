@@ -1,0 +1,12 @@
+menu "BSEC Configuration"
+
+    config BME680_I2C_ADDR
+        hex "BME680 I2C Address"
+        range 0x76 0x77
+        default 0x77
+        help
+            I2C address of the BME680 sensor.
+            0x77: SDO pin connected to VDD (default)
+            0x76: SDO pin connected to GND
+
+endmenu

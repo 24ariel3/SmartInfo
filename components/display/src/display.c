@@ -192,6 +192,12 @@ static void calibrate_touch(uint16_t raw_x, uint16_t raw_y, uint16_t *cal_x,
   *cal_y = (uint16_t)y;
 }
 
+static esp_err_t touch_power_down(void) {
+  // PD0=0 restores PENIRQ; its conversion result is not a coordinate sample.
+  uint8_t discard[2];
+  return esp_lcd_panel_io_rx_param(tp->io, 0xD0, discard, sizeof(discard));
+}
+
 // Helper: perform SPI touch read and process results
 // Returns true if a valid touch was detected, fills cal_x/cal_y
 static bool touch_read_and_process(uint16_t *cal_x, uint16_t *cal_y) {
@@ -203,15 +209,39 @@ static bool touch_read_and_process(uint16_t *cal_x, uint16_t *cal_y) {
   }
 
   uint8_t touch_cnt = 0;
-  esp_lcd_touch_point_data_t touch_points[1];
+  esp_lcd_touch_point_data_t touch_points[1] = {0};
 
-  esp_lcd_touch_read_data(tp);
-  esp_err_t ret = esp_lcd_touch_get_data(tp, touch_points, &touch_cnt, 1);
+#ifdef BSP_LCD_TOUCH_INT
+  ESP_ERROR_CHECK(gpio_intr_disable(BSP_LCD_TOUCH_INT));
+  touch_pending = false;
+#endif
+
+  esp_err_t read_ret = esp_lcd_touch_read_data(tp);
+  esp_err_t ret = read_ret;
+  if (read_ret == ESP_OK) {
+    ret = esp_lcd_touch_get_data(tp, touch_points, &touch_cnt, 1);
+  }
+  // Always rearm PENIRQ, including when the read or coordinate lookup failed.
+  esp_err_t power_ret = touch_power_down();
+
+#ifdef BSP_LCD_TOUCH_INT
+  ESP_ERROR_CHECK(gpio_intr_enable(BSP_LCD_TOUCH_INT));
+  // A held press won't produce another falling edge after interrupts resume.
+  if (gpio_get_level(BSP_LCD_TOUCH_INT) == 0) touch_pending = true;
+#endif
 
   xSemaphoreGive(spi_bus_sem);
 
-  if (ret == ESP_OK && touch_cnt > 0) {
+  if (read_ret != ESP_OK || ret != ESP_OK || power_ret != ESP_OK) {
+    ESP_LOGW(TAG, "Touch SPI: read=%s, data=%s, power-down=%s",
+             esp_err_to_name(read_ret), esp_err_to_name(ret),
+             esp_err_to_name(power_ret));
+  }
+
+  if (read_ret == ESP_OK && ret == ESP_OK && power_ret == ESP_OK &&
+      touch_cnt > 0) {
     calibrate_touch(touch_points[0].x, touch_points[0].y, cal_x, cal_y);
+    ESP_LOGD(TAG, "Touch LVGL: x=%u, y=%u", *cal_x, *cal_y);
     return true;
   }
   return false;
@@ -233,10 +263,9 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 
 #ifdef BSP_LCD_TOUCH_INT
   // ── Interrupt-driven mode ──────────────────────────────────────────
-  // Only read when ISR signals a touch event via touch_pending flag.
-  // Interrupt is disabled during SPI read to prevent PENIRQ noise.
+  // Read after an interrupt or while PENIRQ is already LOW.
 
-  if (!touch_pending) {
+  if (!touch_pending && gpio_get_level(BSP_LCD_TOUCH_INT) != 0) {
     data->point.x = last_x;
     data->point.y = last_y;
     data->state = LV_INDEV_STATE_RELEASED;
@@ -246,14 +275,6 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 
   uint16_t cal_x, cal_y;
   bool touched = touch_read_and_process(&cal_x, &cal_y);
-
-  touch_pending = false;
-
-  // If PENIRQ is still LOW (finger held down), re-set touch_pending
-  // since NEGEDGE won't fire again without a new falling edge
-  if (gpio_get_level(BSP_LCD_TOUCH_INT) == 0) {
-    touch_pending = true;
-  }
 
 #else
   // ── SW polling mode ────────────────────────────────────────────────
@@ -375,6 +396,7 @@ esp_err_t display_init(void) {
           },
   };
   ESP_ERROR_CHECK(esp_lcd_touch_new_spi_xpt2046(tp_io_handle, &tp_cfg, &tp));
+  ESP_ERROR_CHECK(touch_power_down());
 
 #ifdef BSP_LCD_TOUCH_INT
   // Interrupt-driven touch: configure GPIO for PENIRQ with pull-up and

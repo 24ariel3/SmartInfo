@@ -21,5 +21,8 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=110
 # CPU Frequency - 80MHz for maximum power saving (default is 240MHz)
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
 
-# XPT2046 Touch Controller - Enable PENIRQ for interrupt-driven touch
-CONFIG_XPT2046_INTERRUPT_MODE=y
+# Keep ADC on during touch reads; display.c powers down afterward to rearm PENIRQ.
+CONFIG_XPT2046_INTERRUPT_MODE=n
+
+# New OTA images must confirm successful startup before remaining selected.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

@@ -21,12 +21,28 @@ static wifi_connection_state_t s_connection_state =
 
 static int s_retry_num = 0;
 
+static void reconnect_last_network(void) {
+  char ssid[33];
+  char password[65];
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open("wifi_creds", NVS_READONLY, &handle);
+  if (err != ESP_OK) return;
+  size_t len = sizeof(ssid);
+  err = nvs_get_str(handle, "last_ssid", ssid, &len);
+  nvs_close(handle);
+  if (err != ESP_OK || ssid[0] == '\0') return;
+  err = wifi_load_credentials(ssid, password, sizeof(password));
+  if (err == ESP_OK) err = wifi_connect_to_ap(ssid, password);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Saved network unavailable: %s; manual selection remains available",
+             esp_err_to_name(err));
+  }
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-    // esp_wifi_connect(); // Removed auto-connect
-    // s_connection_state = WIFI_CONNECTION_CONNECTING;
-    ESP_LOGI(TAG, "WiFi Started. Waiting for user command...");
+    reconnect_last_network();
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_is_connected = false;
@@ -72,8 +88,21 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     // Save credentials on successful connection
     wifi_config_t conf;
     if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
-      wifi_save_credentials((const char *)conf.sta.ssid,
-                            (const char *)conf.sta.password);
+      char ssid[33] = {0};
+      char password[65] = {0};
+      memcpy(ssid, conf.sta.ssid, sizeof(conf.sta.ssid));
+      memcpy(password, conf.sta.password, sizeof(conf.sta.password));
+      esp_err_t err = wifi_save_credentials(ssid, password);
+      nvs_handle_t handle;
+      if (err == ESP_OK) {
+        err = nvs_open("wifi_creds", NVS_READWRITE, &handle);
+        if (err == ESP_OK) {
+          err = nvs_set_str(handle, "last_ssid", ssid);
+          if (err == ESP_OK) err = nvs_commit(handle);
+          nvs_close(handle);
+        }
+      }
+      if (err != ESP_OK) ESP_LOGW(TAG, "Cannot remember successful network: %s", esp_err_to_name(err));
     }
   }
 }
@@ -177,7 +206,7 @@ esp_err_t wifi_save_credentials(const char *ssid, const char *password) {
     ESP_LOGE(TAG, "Failed to save password for %s (key: %s)", ssid, nvs_key);
   } else {
     ESP_LOGI(TAG, "Saved credentials for %s (key: %s)", ssid, nvs_key);
-    nvs_commit(my_handle);
+    err = nvs_commit(my_handle);
   }
 
   nvs_close(my_handle);

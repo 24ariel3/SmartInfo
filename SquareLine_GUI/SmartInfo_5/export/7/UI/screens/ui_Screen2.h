@@ -61,6 +61,12 @@ extern lv_obj_t * ui_LabelBtnSettingsCancel;
 extern lv_obj_t * ui_ContainerSwttingsBrightness;
 extern lv_obj_t * ui_LabelSettingsBrightness;
 extern lv_obj_t * ui_SliderSettingsScreenBrightness;
+extern lv_obj_t * ui_ContainerSettingsBattery;
+extern lv_obj_t * ui_LabelSettingsBatteryLevel;
+extern lv_obj_t * ui_ContainerSettingsBatteryLevelPercentage;
+extern lv_obj_t * ui_LabelSettingsBatteryLevelPercentage;
+extern lv_obj_t * ui_ContainerSettingsBatteryLevelRaw;
+extern lv_obj_t * ui_LabelSettingsBatteryLevelRaw;
 extern lv_obj_t * ui_Keyboard;
 // CUSTOM VARIABLES
 

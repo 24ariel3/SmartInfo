@@ -56,6 +56,7 @@ The project follows a modular component-based architecture:
   - `stock_monitor`: HTTPS client for fetching financial data.
   - `weather`: API client for weather data.
   - `wifi_connect`: Robust Wi-Fi state machine.
+  - `device_server`: Authenticated local HTTP server for OTA uploads and device status.
   - `time_manager`: SNTP synchronization.
 
 ## ⚙️ Configuration
@@ -96,7 +97,92 @@ Use the provided helper script:
 idf.py -p COMx flash monitor
 ```
 
-> **Note:** The project uses a custom partition table (`partitions.csv`) to maximize app space (`1.8MB` factory app). This is automatically handled by the build system via `sdkconfig.defaults`.
+> **Note:** `partitions.csv` provides two 1,984 KiB OTA application slots in 4 MB flash. NVS and PHY data keep their original addresses.
+
+### OTA updates on local Wi-Fi
+
+The `device_server` component provides authenticated `POST /ota` and `GET /status`
+on port 80. A reusable worker and its 8 KiB stack/4 KiB transfer buffer are reserved
+at startup, so runtime heap fragmentation cannot prevent those allocations.
+Status requests remain available during an update. Wi-Fi logs and diagnostic
+commands are not implemented yet.
+
+For the first installation:
+
+1. Run `idf.py menuconfig`, open **Device Server**, and configure a random
+   64-character hexadecimal bearer token. Generate one with
+   `python -c "import secrets; print(secrets.token_hex(32))"`. Keep it in local
+   `sdkconfig`; do not commit it. An empty or invalid token disables the server.
+2. Run `idf.py build` and `idf.py -p COM4 flash`. This installs the bootloader,
+   partition table, OTA metadata, and application. Do not use `erase-flash`;
+   existing NVS settings and sensor state are preserved.
+3. Connect using the Wi-Fi screen once. The device remembers the last successful
+   network and attempts a non-blocking reconnection on subsequent boots.
+4. Find the device IP in the `got ip:` serial message or your router's DHCP list.
+   A DHCP reservation keeps the address stable.
+
+For subsequent updates, build the firmware and use the Windows batch helper:
+
+```powershell
+idf.py build
+.\ota_update.bat 192.168.0.53
+```
+
+Replace the IP with your device's address. The helper defaults to
+`build\SmartInfo7.bin`; an optional second argument selects another application:
+`ota_update.bat 192.168.0.53 "C:\firmware\SmartInfo7.bin"`.
+It uses `SMARTINFO_OTA_TOKEN` when set, otherwise reads the token from local
+`sdkconfig`, without printing it. It checks readiness, uploads, and verifies that
+the exact build is confirmed in the other slot after reboot. A rollback or failed
+verification returns a nonzero exit code. No ESP-IDF shell is needed to upload an
+already-built image; Windows PowerShell and `curl.exe` are required.
+
+Alternatively, run these PowerShell commands from the repository root
+in an initialized ESP-IDF shell, replacing `<device-ip>`:
+
+```powershell
+idf.py build
+$env:SMARTINFO_OTA_TOKEN = (Select-String '^CONFIG_DEVICE_SERVER_AUTH_TOKEN="([^"]*)"$' sdkconfig).Matches[0].Groups[1].Value
+curl.exe --noproxy '*' --fail-with-body -H "Authorization: Bearer $env:SMARTINFO_OTA_TOKEN" -H "Content-Type: application/octet-stream" --data-binary "@build/SmartInfo7.bin" "http://<device-ip>/ota"
+```
+
+Send only the application `.bin`, as raw bytes, not a multipart upload, bootloader,
+or merged flash image. Keep the token the same across builds. HTTP is unencrypted:
+use a trusted LAN and do not forward this service to the internet. Firmware images
+also contain the token and should be kept private.
+
+After acceptance the device restarts, reconnects, and checks startup health:
+
+```powershell
+curl.exe --noproxy '*' --fail-with-body -H "Authorization: Bearer $env:SMARTINFO_OTA_TOKEN" "http://<device-ip>/status"
+```
+
+Status includes `version`, `build_hash`, `slot`, `pending_verify`, `ota_phase`,
+`received`, `total`, `ota_error`, `free_heap`, and `largest_free_block` (bytes).
+Boot state follows ESP-IDF's numeric OTA state.
+A pending image is confirmed after successful device-server/UI initialization,
+30 seconds of operation, and a BSEC sample no older than 10 seconds.
+Internet services are not health checks.
+Startup failure requests rollback; a reset before confirmation also rolls back.
+Further uploads are rejected while boot verification or another upload is active.
+
+Failed, oversized, incompatible, interrupted, or stalled uploads do not select a
+new boot slot. Uploads have a 180-second deadline. Keep power stable during updates.
+Ordinary OTA changes application firmware only; bootloader/partition layout changes
+still require USB. Changes to NVS formats must remain compatible with rollback.
+
+Hardware regression checks (the `--update` option writes both slots and reboots):
+
+```powershell
+python tools/test_ota.py <device-ip> --image build/SmartInfo7.bin --update
+```
+
+Add `--timeout-test` to test the three-minute stalled-upload deadline. The script
+uses only the Python standard library and reads `SMARTINFO_OTA_TOKEN` from the
+environment. It also tests invalid images, wrong project/chip, authentication,
+concurrent requests, and interrupted transfers.
+Add `--batch-helper` on Windows to test the batch helper's argument/token checks
+and perform an upload with reboot verification using the token in local `sdkconfig`.
 
 ## 🧩 Pin Configuration
 Pin mappings are defined in `components/bsp/include/bsp.h`. standard configuration for ESP32 DevKit V1:
@@ -111,4 +197,35 @@ Pin mappings are defined in `components/bsp/include/bsp.h`. standard configurati
 - **Backlight:** GPIO 4
 - **I2C SDA:** GPIO 21
 - **I2C SCL:** GPIO 22
+- **Battery sense:** GPIO 34 (ADC1 channel 6, `BSP_BAT_SENSE`), white wire from the divider midpoint.
+
+### BME680 Wiring
+
+| BME680 pin | Wire color | ESP32 DevKit V1 connection |
+|---|---|---|
+| SDA | Green | GPIO 21 |
+| SCL | Yellow | GPIO 22 |
+| GND | Black | GND |
+| VCC | Red | 3V3 (3.3 V) |
+
+### LCD and Touch Wiring
+
+Bridge the touch clock and data pins to the corresponding LCD SPI pins as listed below.
+
+| LCD/touch pin | Wire color | ESP32 DevKit V1 connection |
+|---|---|---|
+| LCD_BACKLIGHT | Green | GPIO 4 |
+| LCD_SPI_CLK | Blue | GPIO 18 |
+| LCD_TOUCH_CLK | Blue | GPIO 18, bridged to LCD_SPI_CLK |
+| LCD_SPI_MISO | Green | GPIO 19 |
+| LCD_TOUCH_DO | Green | GPIO 19, bridged to LCD_SPI_MISO |
+| LCD_SPI_MOSI | Yellow | GPIO 23 |
+| LCD_TOUCH_DIN | Yellow | GPIO 23, bridged to LCD_SPI_MOSI |
+| LCD_DC | Blue | GPIO 32 |
+| LCD_RST | White | GPIO 26 |
+| LCD_SPI_CS | Green | GPIO 25 |
+| LCD_TOUCH_CS | White | GPIO 13 |
+| LCD_TOUCH_INT | Yellow | GPIO 27 |
+| GND | Black | GND |
+| VCC | Red | 3V3 (3.3 V) |
 
