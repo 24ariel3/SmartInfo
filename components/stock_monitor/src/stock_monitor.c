@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 #include "wifi_connect.h"
+#include <ctype.h>
 #include <string.h>
 
 
@@ -42,8 +43,16 @@ static double get_json_double(cJSON *json, const char *key) {
 }
 
 esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data) {
+  if (!symbol || !symbol[0]) return ESP_ERR_INVALID_ARG;
+  char ticker[sizeof(s_stock_symbol_1)];
+  size_t symbol_len = strlen(symbol);
+  if (symbol_len >= sizeof(ticker)) return ESP_ERR_INVALID_SIZE;
+  for (size_t i = 0; i <= symbol_len; ++i) {
+    ticker[i] = (char)toupper((unsigned char)symbol[i]);
+  }
+
   char url[256];
-  snprintf(url, sizeof(url), FINNHUB_URL_TEMPLATE, symbol,
+  snprintf(url, sizeof(url), FINNHUB_URL_TEMPLATE, ticker,
            CONFIG_FINNHUB_API_KEY);
 
   char *response_buffer = NULL;
@@ -53,7 +62,7 @@ esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data) {
     cJSON *json = cJSON_Parse(response_buffer);
     if (json) {
       cJSON *price = cJSON_GetObjectItem(json, "c");
-      if (price) {
+      if (cJSON_IsNumber(price) && price->valuedouble > 0) {
         if (out_data) {
           out_data->current_price = (float)get_json_double(json, "c");
           out_data->change = (float)get_json_double(json, "d");
@@ -68,14 +77,11 @@ esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data) {
             out_data->timestamp = (int64_t)ts->valuedouble;
           }
         }
-        ESP_LOGI(TAG, "Stock %s: $%.2f", symbol,
+        ESP_LOGI(TAG, "Stock %s: $%.2f", ticker,
                  out_data ? out_data->current_price : 0.0f);
         err = ESP_OK;
       } else {
-        ESP_LOGW(TAG, "Invalid JSON format for %s: %s", symbol,
-                 response_buffer);
-        // Don't set err to FAIL here, maybe we got some data? NO, price is
-        // essential.
+        ESP_LOGW(TAG, "No valid quote for %s", ticker);
         err = ESP_FAIL;
       }
       cJSON_Delete(json);
@@ -272,6 +278,6 @@ void stock_monitor_start(void) {
   if (stock_mutex == NULL) {
     stock_monitor_init();
   }
-  xTaskCreatePinnedToCore(stock_monitor_task, "stock_mon", 4096, NULL, 1, NULL,
+  xTaskCreatePinnedToCore(stock_monitor_task, "stock_mon", 6144, NULL, 1, NULL,
                           0);
 }

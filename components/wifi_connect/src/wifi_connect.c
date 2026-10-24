@@ -1,5 +1,6 @@
 #include "wifi_connect.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -8,6 +9,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "string.h"
+#include <limits.h>
 
 static const char *TAG = "WIFI";
 
@@ -272,43 +274,46 @@ static void ensure_http_mutex(void) {
 // Helper to read HTTP response into a dynamic buffer
 static char *http_download_to_buffer(esp_http_client_handle_t client,
                                      int *out_len) {
-  int content_length = esp_http_client_get_content_length(client);
-  if (content_length < 0) {
-    ESP_LOGW(TAG, "Content-Length unknown, using default size");
-    content_length = 4096; // Reasonable default for chunked
-  }
-
-  char *buffer = malloc(content_length + 1);
+  int64_t content_length = esp_http_client_get_content_length(client);
+  if (content_length > INT_MAX - 1) return NULL;
+  int capacity = content_length > 0 ? (int)content_length : 1024;
+  char *buffer = malloc((size_t)capacity + 1);
   if (buffer == NULL) {
-    ESP_LOGE(TAG, "Failed to allocate %d bytes for response", content_length);
+    ESP_LOGE(TAG, "Failed to allocate %d bytes for response", capacity);
     return NULL;
   }
 
   int total_read = 0;
   while (1) {
-    int read_len = esp_http_client_read(client, buffer + total_read,
-                                        content_length - total_read);
+    char extra;
+    bool full = total_read == capacity;
+    int read_len = esp_http_client_read(client, full ? &extra : buffer + total_read,
+                                        full ? 1 : capacity - total_read);
     if (read_len <= 0) {
+      if (read_len < 0 || !esp_http_client_is_complete_data_received(client)) {
+        ESP_LOGE(TAG, "HTTP response incomplete");
+        free(buffer);
+        return NULL;
+      }
       break;
     }
-    total_read += read_len;
-    // Handle chunked encoding growth if content-length was unknown/wrong
-    if (read_len > 0 && total_read >= content_length) {
-      // if we filled the buffer, verify if we need more
-      // For simple content-length, we shouldn't get here unless logic is off
-      // For chunked, length might be -1 initally handled above?
-      // Let's assume content_length was correct or we need realloc
-      // But esp_http_client_read stops at drain?
-      // Let's implement safe growth just in case
-      content_length *= 2;
-      char *new_buffer = realloc(buffer, content_length + 1);
+    if (full) {
+      if (capacity > (INT_MAX - 1) / 2) {
+        free(buffer);
+        return NULL;
+      }
+      char *new_buffer = realloc(buffer, (size_t)capacity * 2 + 1);
       if (!new_buffer) {
         ESP_LOGE(TAG, "Failed to reallocate buffer");
         free(buffer);
         return NULL;
       }
       buffer = new_buffer;
+      capacity *= 2;
+      buffer[total_read] = extra;
     }
+    total_read += read_len;
+    if (content_length > 0 && total_read == content_length) break;
   }
   buffer[total_read] = 0; // Null terminate
   if (out_len)
@@ -364,7 +369,10 @@ esp_err_t wifi_perform_http_get(const char *url, char **out_buffer) {
       ESP_LOGE(TAG, "Failed to fetch headers");
     }
   } else {
-    ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "HTTP open failed: %s (heap=%lu, largest=%lu)",
+             esp_err_to_name(err),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   }
 
   esp_http_client_cleanup(client);

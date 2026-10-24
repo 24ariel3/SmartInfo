@@ -103,8 +103,9 @@ void app_main(void) {
   // Initialize NTP Time Manager
   time_manager_init();
 
-  // Initialize Weather
-  weather_start_task();
+  // Load saved settings before UI initialization; start network tasks afterward.
+  ESP_ERROR_CHECK(weather_init());
+  stock_monitor_init();
 
   // Initialize BSP (GPIOs, SPI, I2C)
   ESP_ERROR_CHECK(bsp_init());
@@ -118,9 +119,6 @@ void app_main(void) {
 
   // Start the BSEC processing task
   bsec_start_task();
-
-  // Start Stock Monitor
-  stock_monitor_start();
 
   // Initialize Display
   ESP_ERROR_CHECK(display_init());
@@ -158,6 +156,11 @@ void app_main(void) {
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "Device server unavailable: %s", esp_err_to_name(ret));
   }
+
+  // Start network fetchers after the UI and device server finish allocating RAM.
+  weather_start_task();
+  stock_monitor_start();
+
   vTaskDelay(pdMS_TO_TICKS(30000));
   int64_t sensor_ts = bsec_get_last_updated_time();
   bool healthy = ret == ESP_OK && display_get_handle() != NULL && sensor_ts > 0 &&

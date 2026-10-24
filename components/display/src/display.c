@@ -428,12 +428,18 @@ esp_err_t display_init(void) {
   // Create a display
   disp = lv_display_create(BSP_LCD_H_RES, BSP_LCD_V_RES);
 
-  // Allocate draw buffers
-  uint32_t buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES / 10 * sizeof(uint16_t);
+  // Two 16-row buffers leave internal RAM available for TLS handshakes.
+  uint32_t buffer_size = BSP_LCD_H_RES * 16 * sizeof(uint16_t);
   void *buf1 =
       heap_caps_malloc(buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   void *buf2 =
       heap_caps_malloc(buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+
+  if (!buf1 || !buf2) {
+    heap_caps_free(buf1);
+    heap_caps_free(buf2);
+    return ESP_ERR_NO_MEM;
+  }
 
   lv_display_set_buffers(disp, buf1, buf2, buffer_size,
                          LV_DISPLAY_RENDER_MODE_PARTIAL);

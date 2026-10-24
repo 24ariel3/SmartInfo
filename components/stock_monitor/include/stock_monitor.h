@@ -69,9 +69,9 @@ int64_t stock_get_last_updated_time(void);
  *
  * This is a blocking call that performs an HTTP request.
  *
- * @param[in] symbol Stock symbol (e.g. "AAPL")
+ * @param[in] symbol Stock symbol (e.g. "AAPL"), converted to uppercase for the API
  * @param[out] out_data Pointer to stock_data_t to store the data
- * @return ESP_OK if successful, ESP_FAIL otherwise
+ * @return ESP_OK for a positive quote, or an error if no valid quote is available
  */
 esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data);
 

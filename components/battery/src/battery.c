@@ -1,6 +1,7 @@
 #include "battery.h"
 
 #include <assert.h>
+#include <stddef.h>
 
 #include "bsp.h"
 #include "esp_adc/adc_cali.h"
@@ -47,6 +48,30 @@ static adc_oneshot_unit_handle_t battery_adc;
 static adc_channel_t battery_channel;
 static adc_cali_handle_t battery_calibration;
 
+// shortcut: generic room-temperature curve, calibrate this pack if SOC accuracy under load or temperature changes matters.
+static const struct {
+  int millivolts;
+  int percent;
+} battery_soc_lut[] = {
+    {3300, 0}, {3410, 10}, {3510, 20}, {3570, 30}, {3620, 40}, {3690, 50},
+    {3790, 60}, {3880, 70}, {3960, 80}, {4050, 90}, {4100, 95}, {4150, 100},
+};
+
+static int battery_voltage_to_percent(int battery_mv) {
+  if (battery_mv <= battery_soc_lut[0].millivolts) return battery_soc_lut[0].percent;
+
+  for (size_t i = 1; i < sizeof(battery_soc_lut) / sizeof(battery_soc_lut[0]); ++i) {
+    if (battery_mv <= battery_soc_lut[i].millivolts) {
+      int mv_range = battery_soc_lut[i].millivolts - battery_soc_lut[i - 1].millivolts;
+      int percent_range = battery_soc_lut[i].percent - battery_soc_lut[i - 1].percent;
+      return battery_soc_lut[i - 1].percent +
+             (battery_mv - battery_soc_lut[i - 1].millivolts) * percent_range / mv_range;
+    }
+  }
+
+  return battery_soc_lut[sizeof(battery_soc_lut) / sizeof(battery_soc_lut[0]) - 1].percent;
+}
+
 esp_err_t battery_read(int *voltage_mv, int *percent) {
   if (!voltage_mv || !percent) return ESP_ERR_INVALID_ARG;
   if (!battery_adc || !battery_calibration) return ESP_ERR_INVALID_STATE;
@@ -65,8 +90,7 @@ esp_err_t battery_read(int *voltage_mv, int *percent) {
 
   int battery_mv = pin_mv * 2;
   *voltage_mv = battery_mv;
-  *percent = battery_mv <= 3300 ? 0 : battery_mv >= 4200 ? 100 :
-             (battery_mv - 3300) * 100 / 900;
+  *percent = battery_voltage_to_percent(battery_mv);
   assert(*percent >= 0 && *percent <= 100);
   return ESP_OK;
 }

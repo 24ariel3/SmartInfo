@@ -8,5 +8,5 @@
  */
 esp_err_t battery_init(void);
 
-/** Read cell voltage in mV and approximate charge (3300 mV = 0%, 4200 mV = 100%). */
+/** Read cell voltage in mV and approximate charge using the battery voltage LUT. */
 esp_err_t battery_read(int *voltage_mv, int *percent);
