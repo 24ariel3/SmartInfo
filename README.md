@@ -206,6 +206,12 @@ The battery voltage divider uses 100 kÎ© from battery BAT+ to GPIO 34 and 100 kÎ
 
 The firmware samples charger presence once per second and requires two consecutive readings beyond its 0.8 V connected / 0.4 V disconnected thresholds. The current and previous battery-run counters are displayed as `HH:MM:SS`; NVS stores them once per minute and on charger-state changes. While charging, the raw-voltage label shows `Charging`; the percentage remains voltage-based.
 
+### Battery Power Efficiency
+
+The display remains on. After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower) and the LVGL loop may sleep up to 100 ms; touch restores the selected brightness. LVGL time now comes directly from `esp_timer`, removing the recurring 2 ms tick timer.
+
+Wi-Fi starts on demand and is stopped when no owner needs it. Startup keeps it available for 60 seconds, stock quotes refresh every five minutes, weather refreshes hourly, and the network settings tab, scans, sync requests, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap. Automatic light sleep remains deferred; it needs separate validation with the LCD PWM and touch wake path.
+
 ### BME680 Wiring
 
 | BME680 pin | Wire color | ESP32 DevKit V1 connection |

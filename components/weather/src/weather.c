@@ -4,7 +4,6 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "freertos/task.h"
 #include "nvs.h"
 #include "wifi_connect.h"
 #include <stdio.h>
@@ -50,17 +49,18 @@ static char s_city_name[64] = "";
 static char s_latitude[16] = "";
 static char s_longitude[16] = "";
 static bool s_location_loaded = false;
-static volatile bool s_refresh_requested = false;
 
-// Async city request - geocoding will run in weather task
+// UI queues city requests; the network sync task performs geocoding.
 static char s_pending_city[64] = "";
-static volatile bool s_city_lookup_pending = false;
-static volatile int s_city_lookup_result =
-    0; // 0=none, 1=success, -1=not found, -2=error
+static bool s_city_lookup_pending = false;
+static int s_city_lookup_result = 0; // 0=none, 1=success, -1=not found, -2=error
+static uint32_t s_city_request_id;
 
 // Forward declarations
 static esp_err_t geocode_city(const char *city, char *lat_out, char *lon_out);
-static esp_err_t weather_save_location_to_nvs(void);
+static esp_err_t weather_save_location_to_nvs(const char *city,
+                                              const char *latitude,
+                                              const char *longitude);
 
 // Load location from NVS
 static void weather_load_location_from_nvs(void) {
@@ -82,19 +82,22 @@ static void weather_load_location_from_nvs(void) {
 }
 
 // Save location to NVS
-static esp_err_t weather_save_location_to_nvs(void) {
+static esp_err_t weather_save_location_to_nvs(const char *city,
+                                              const char *latitude,
+                                              const char *longitude) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(WEATHER_NVS_NAMESPACE, NVS_READWRITE, &handle);
   if (err != ESP_OK)
     return err;
 
-  nvs_set_str(handle, WEATHER_NVS_KEY_CITY, s_city_name);
-  nvs_set_str(handle, WEATHER_NVS_KEY_LAT, s_latitude);
-  nvs_set_str(handle, WEATHER_NVS_KEY_LON, s_longitude);
-  err = nvs_commit(handle);
+  err = nvs_set_str(handle, WEATHER_NVS_KEY_CITY, city);
+  if (err == ESP_OK) err = nvs_set_str(handle, WEATHER_NVS_KEY_LAT, latitude);
+  if (err == ESP_OK) err = nvs_set_str(handle, WEATHER_NVS_KEY_LON, longitude);
+  if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
-  ESP_LOGI(TAG, "Saved weather location: %s (%s, %s)", s_city_name, s_latitude,
-           s_longitude);
+  if (err == ESP_OK)
+    ESP_LOGI(TAG, "Saved weather location: %s (%s, %s)", city, latitude,
+             longitude);
   return err;
 }
 
@@ -102,21 +105,25 @@ esp_err_t weather_init(void) {
   if (s_weather_mutex == NULL) {
     s_weather_mutex = xSemaphoreCreateMutex();
   }
+  if (s_weather_mutex == NULL) return ESP_ERR_NO_MEM;
   weather_load_location_from_nvs();
   return ESP_OK;
 }
 
 // Helper to perform HTTP request and parse JSON (No cache update)
-static esp_err_t execute_weather_fetch(weather_data_t *data) {
+static esp_err_t execute_weather_fetch(weather_data_t *data,
+                                       const char *city,
+                                       const char *latitude,
+                                       const char *longitude, bool loaded) {
   if (data == NULL)
     return ESP_ERR_INVALID_ARG;
 
   // Build URL - use saved coordinates or default
   char url[512];
-  if (s_location_loaded && strlen(s_latitude) > 0 && strlen(s_longitude) > 0) {
-    snprintf(url, sizeof(url), WEATHER_LAT_LON_URL, s_latitude, s_longitude);
-    ESP_LOGI(TAG, "Fetching weather for %s (%s, %s)", s_city_name, s_latitude,
-             s_longitude);
+  if (loaded && latitude[0] && longitude[0]) {
+    snprintf(url, sizeof(url), WEATHER_LAT_LON_URL, latitude, longitude);
+    ESP_LOGI(TAG, "Fetching weather for %s (%s, %s)", city, latitude,
+             longitude);
   } else {
     strncpy(url, WEATHER_URL, sizeof(url) - 1);
     url[sizeof(url) - 1] = '\0';
@@ -263,99 +270,78 @@ esp_err_t weather_get_latest_values(weather_data_t *out_data,
   return ESP_ERR_TIMEOUT;
 }
 
-// Background task
-static void weather_task(void *arg) {
-  ESP_LOGI(TAG, "Weather Task Started");
+esp_err_t weather_refresh(void) {
+  if (!s_weather_mutex) return ESP_ERR_INVALID_STATE;
 
-  // Wait for WiFi
-  while (!wifi_is_connected()) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+  char pending_city[sizeof(s_pending_city)] = "";
+  uint32_t request_id = 0;
+  bool lookup_pending = false;
+  if (xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  lookup_pending = s_city_lookup_pending;
+  if (lookup_pending) {
+    strlcpy(pending_city, s_pending_city, sizeof(pending_city));
+    request_id = s_city_request_id;
   }
+  xSemaphoreGive(s_weather_mutex);
 
-  while (1) {
-    // Check for pending city lookup (async geocoding)
-    if (s_city_lookup_pending) {
-      ESP_LOGI(TAG, "Processing pending city lookup: %s", s_pending_city);
-      char lat[16], lon[16];
-      esp_err_t err = geocode_city(s_pending_city, lat, lon);
-
-      if (err == ESP_OK) {
-        // Save to static vars
-        strncpy(s_city_name, s_pending_city, sizeof(s_city_name) - 1);
-        s_city_name[sizeof(s_city_name) - 1] = '\0';
-        strncpy(s_latitude, lat, sizeof(s_latitude) - 1);
-        s_latitude[sizeof(s_latitude) - 1] = '\0';
-        strncpy(s_longitude, lon, sizeof(s_longitude) - 1);
-        s_longitude[sizeof(s_longitude) - 1] = '\0';
-        s_location_loaded = true;
-
-        weather_save_location_to_nvs();
-        s_city_lookup_result = 1; // Success
-        s_refresh_requested = true;
-        ESP_LOGI(TAG, "City lookup success: %s -> (%s, %s)", s_city_name, lat,
-                 lon);
-      } else if (err == ESP_ERR_NOT_FOUND) {
-        s_city_lookup_result = -1; // Not found
-        ESP_LOGW(TAG, "City not found: %s", s_pending_city);
-      } else {
-        s_city_lookup_result = -2; // Error
-        ESP_LOGE(TAG, "City lookup error: %s", s_pending_city);
-      }
+  if (lookup_pending) {
+    ESP_LOGI(TAG, "Processing city lookup: %s", pending_city);
+    char lat[16], lon[16];
+    esp_err_t lookup_err = geocode_city(pending_city, lat, lon);
+    bool save_location = false;
+    if (xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+      return ESP_ERR_TIMEOUT;
+    if (request_id == s_city_request_id) {
       s_city_lookup_pending = false;
-    }
-
-    // Clear refresh flag
-    s_refresh_requested = false;
-
-    ESP_LOGI(TAG, "Fetching weather data (background)...");
-    weather_data_t temp = {0};
-
-    if (execute_weather_fetch(&temp) == ESP_OK) {
-      if (s_weather_mutex &&
-          xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        s_cached_weather = temp;
-        s_cache_initialized = true;
-        s_last_update_ts = esp_timer_get_time();
-        xSemaphoreGive(s_weather_mutex);
-        ESP_LOGI(TAG, "Weather cache updated");
+      if (lookup_err == ESP_OK) {
+        strlcpy(s_city_name, pending_city, sizeof(s_city_name));
+        strlcpy(s_latitude, lat, sizeof(s_latitude));
+        strlcpy(s_longitude, lon, sizeof(s_longitude));
+        s_location_loaded = true;
+        s_city_lookup_result = 1;
+        save_location = true;
+        ESP_LOGI(TAG, "City lookup success: %s -> (%s, %s)", pending_city,
+                 lat, lon);
+      } else if (lookup_err == ESP_ERR_NOT_FOUND) {
+        s_city_lookup_result = -1;
+        ESP_LOGW(TAG, "City not found: %s", pending_city);
+      } else {
+        s_city_lookup_result = -2;
+        ESP_LOGE(TAG, "City lookup failed: %s", pending_city);
       }
     }
-    ESP_LOGI(TAG, "Weather Stack Remaining: %lu bytes",
-             (unsigned long)uxTaskGetStackHighWaterMark(NULL));
-
-    // Calculate time until next whole hour
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-
-    // Seconds remaining until next hour
-    int seconds_to_next_hour = (60 - timeinfo.tm_min) * 60 - timeinfo.tm_sec;
-    if (seconds_to_next_hour <= 0) {
-      seconds_to_next_hour = 3600; // Fallback to 1 hour if at exact hour
-    }
-
-    ESP_LOGI(TAG, "Next weather fetch in %d seconds (at next whole hour)",
-             seconds_to_next_hour);
-
-    // Wait with periodic checks for refresh or city lookup request
-    int wait_time_ms = seconds_to_next_hour * 1000;
-    while (wait_time_ms > 0 && !s_refresh_requested && !s_city_lookup_pending) {
-      int delay = (wait_time_ms > 1000) ? 1000 : wait_time_ms;
-      vTaskDelay(pdMS_TO_TICKS(delay));
-      wait_time_ms -= delay;
-    }
-
-    if (s_refresh_requested) {
-      ESP_LOGI(TAG, "Weather refresh requested - fetching immediately");
+    xSemaphoreGive(s_weather_mutex);
+    if (save_location &&
+        weather_save_location_to_nvs(pending_city, lat, lon) != ESP_OK) {
+      ESP_LOGW(TAG, "Could not persist weather location");
     }
   }
-}
 
-void weather_start_task(void) {
-  if (s_weather_mutex == NULL)
-    weather_init();
-  xTaskCreate(weather_task, "weather_task", 6144, NULL, 5, NULL);
+  char city[sizeof(s_city_name)];
+  char latitude[sizeof(s_latitude)];
+  char longitude[sizeof(s_longitude)];
+  bool loaded;
+  if (xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  strlcpy(city, s_city_name, sizeof(city));
+  strlcpy(latitude, s_latitude, sizeof(latitude));
+  strlcpy(longitude, s_longitude, sizeof(longitude));
+  loaded = s_location_loaded;
+  xSemaphoreGive(s_weather_mutex);
+
+  weather_data_t temp = {0};
+  esp_err_t err = execute_weather_fetch(&temp, city, latitude, longitude, loaded);
+  if (err != ESP_OK) return err;
+
+  if (xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  s_cached_weather = temp;
+  s_cache_initialized = true;
+  s_last_update_ts = esp_timer_get_time();
+  xSemaphoreGive(s_weather_mutex);
+  ESP_LOGI(TAG, "Weather cache updated");
+  return ESP_OK;
 }
 
 // Geocoding: look up city coordinates from Nominatim
@@ -420,12 +406,15 @@ static esp_err_t geocode_city(const char *city, char *lat_out, char *lon_out) {
 esp_err_t weather_set_city(const char *city) {
   if (!city || strlen(city) == 0)
     return ESP_ERR_INVALID_ARG;
+  if (!s_weather_mutex) return ESP_ERR_INVALID_STATE;
 
-  // Copy city to pending buffer and set flag
-  strncpy(s_pending_city, city, sizeof(s_pending_city) - 1);
-  s_pending_city[sizeof(s_pending_city) - 1] = '\0';
+  if (xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  strlcpy(s_pending_city, city, sizeof(s_pending_city));
+  s_city_request_id++;
   s_city_lookup_result = 0; // Reset result
   s_city_lookup_pending = true;
+  xSemaphoreGive(s_weather_mutex);
 
   ESP_LOGI(TAG, "City lookup queued: %s", city);
   return ESP_OK;
@@ -433,21 +422,39 @@ esp_err_t weather_set_city(const char *city) {
 
 // Get the result of the last city lookup
 // Returns: 0=pending, 1=success, -1=not found, -2=error
-int weather_get_city_lookup_result(void) { return s_city_lookup_result; }
+int weather_get_city_lookup_result(void) {
+  if (!s_weather_mutex ||
+      xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return -2;
+  int result = s_city_lookup_result;
+  xSemaphoreGive(s_weather_mutex);
+  return result;
+}
 
 // Check if a city lookup is pending
-bool weather_is_city_lookup_pending(void) { return s_city_lookup_pending; }
+bool weather_is_city_lookup_pending(void) {
+  if (!s_weather_mutex ||
+      xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
+  bool pending = s_city_lookup_pending;
+  xSemaphoreGive(s_weather_mutex);
+  return pending;
+}
 
 esp_err_t weather_get_city(char *city_out, size_t len) {
   if (!city_out || len == 0)
     return ESP_ERR_INVALID_ARG;
 
+  if (!s_weather_mutex ||
+      xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
   if (!s_location_loaded || strlen(s_city_name) == 0) {
+    xSemaphoreGive(s_weather_mutex);
     return ESP_ERR_NOT_FOUND;
   }
-
   strncpy(city_out, s_city_name, len - 1);
   city_out[len - 1] = '\0';
+  xSemaphoreGive(s_weather_mutex);
   return ESP_OK;
 }
 
@@ -456,8 +463,12 @@ esp_err_t weather_get_location(char *lat_out, size_t lat_len, char *lon_out,
   if (!lat_out || lat_len == 0 || !lon_out || lon_len == 0)
     return ESP_ERR_INVALID_ARG;
 
+  if (!s_weather_mutex ||
+      xSemaphoreTake(s_weather_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
   if (!s_location_loaded || strlen(s_latitude) == 0 ||
       strlen(s_longitude) == 0) {
+    xSemaphoreGive(s_weather_mutex);
     return ESP_ERR_NOT_FOUND;
   }
 
@@ -465,10 +476,6 @@ esp_err_t weather_get_location(char *lat_out, size_t lat_len, char *lon_out,
   lat_out[lat_len - 1] = '\0';
   strncpy(lon_out, s_longitude, lon_len - 1);
   lon_out[lon_len - 1] = '\0';
+  xSemaphoreGive(s_weather_mutex);
   return ESP_OK;
-}
-
-void weather_trigger_refresh(void) {
-  s_refresh_requested = true;
-  ESP_LOGI(TAG, "Weather refresh requested");
 }

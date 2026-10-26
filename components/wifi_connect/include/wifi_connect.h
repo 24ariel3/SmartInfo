@@ -2,6 +2,8 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,10 +43,19 @@ bool wifi_has_saved_credentials(const char *ssid);
  */
 void wifi_connect_init(void);
 
-/**
- * @brief Cleanup Wi-Fi connection
- */
-void wifi_disconnect(void);
+typedef enum {
+  WIFI_POWER_STARTUP,
+  WIFI_POWER_SYNC,
+  WIFI_POWER_NETWORK_UI,
+  WIFI_POWER_SCAN,
+  WIFI_POWER_OTA,
+  WIFI_POWER_OWNER_COUNT
+} wifi_power_owner_t;
+
+/** Keep the radio enabled while a subsystem needs it. Each acquire must pair with a release. */
+esp_err_t wifi_power_acquire(wifi_power_owner_t owner);
+void wifi_power_release(wifi_power_owner_t owner);
+bool wifi_wait_connected(uint32_t timeout_ms);
 
 /**
  * @brief Check if Wi-Fi is connected

@@ -5,6 +5,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -14,9 +15,14 @@
 static const char *TAG = "WIFI";
 
 static EventGroupHandle_t s_wifi_event_group;
-static bool s_is_connected = false;
+static volatile bool s_is_connected = false;
 static wifi_connection_state_t s_connection_state =
     WIFI_CONNECTION_IDLE; // New state variable
+static SemaphoreHandle_t s_power_mutex;
+static unsigned s_power_holds[WIFI_POWER_OWNER_COUNT];
+static bool s_wifi_initialized;
+static volatile bool s_radio_running;
+static volatile bool s_radio_requested;
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -48,10 +54,15 @@ static void event_handler(void *arg, esp_event_base_t event_base,
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_is_connected = false;
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
     // Check disconnect reason
     wifi_event_sta_disconnected_t *d_event =
         (wifi_event_sta_disconnected_t *)event_data;
+    if (!s_radio_requested) {
+      ESP_LOGI(TAG, "Radio is stopping; ignoring reconnect");
+      return;
+    }
     if (d_event->reason == WIFI_REASON_ASSOC_LEAVE) {
       ESP_LOGI(TAG, "Disconnected by user (ASSOC_LEAVE), ignoring retry");
       return;
@@ -111,6 +122,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
 
 void wifi_connect_init(void) {
   s_wifi_event_group = xEventGroupCreate();
+  if (s_wifi_event_group == NULL) ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
 
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -127,16 +139,71 @@ void wifi_connect_init(void) {
       IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_start());
+  s_power_mutex = xSemaphoreCreateMutex();
+  if (s_power_mutex == NULL) ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+  s_wifi_initialized = true;
 
-  ESP_LOGI(TAG, "wifi_init_sta finished.");
-  // Removed blocking wait to allow non-blocking UI
+  ESP_LOGI(TAG, "Wi-Fi initialized; radio will start on demand.");
 }
 
-void wifi_disconnect(void) {
-  s_connection_state = WIFI_CONNECTION_IDLE;
-  esp_wifi_disconnect();
-  esp_wifi_stop();
+esp_err_t wifi_power_acquire(wifi_power_owner_t owner) {
+  if ((unsigned)owner >= WIFI_POWER_OWNER_COUNT) return ESP_ERR_INVALID_ARG;
+  if (!s_wifi_initialized) return ESP_ERR_INVALID_STATE;
+
+  xSemaphoreTake(s_power_mutex, portMAX_DELAY);
+  s_power_holds[owner]++;
+  if (!s_radio_running) {
+    xEventGroupClearBits(s_wifi_event_group,
+                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_radio_requested = true;
+    s_radio_running = true;
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+      s_radio_requested = false;
+      s_radio_running = false;
+      s_power_holds[owner]--;
+      xSemaphoreGive(s_power_mutex);
+      return err;
+    }
+  }
+  xSemaphoreGive(s_power_mutex);
+  return ESP_OK;
+}
+
+void wifi_power_release(wifi_power_owner_t owner) {
+  if ((unsigned)owner >= WIFI_POWER_OWNER_COUNT || !s_power_mutex) return;
+
+  xSemaphoreTake(s_power_mutex, portMAX_DELAY);
+  if (s_power_holds[owner] > 0) s_power_holds[owner]--;
+  bool any_holds = false;
+  for (size_t i = 0; i < WIFI_POWER_OWNER_COUNT; ++i)
+    any_holds |= s_power_holds[i] != 0;
+
+  if (!any_holds && s_radio_running) {
+    s_radio_requested = false;
+    s_connection_state = WIFI_CONNECTION_IDLE;
+    s_is_connected = false;
+    xEventGroupClearBits(s_wifi_event_group,
+                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    esp_wifi_disconnect();
+    esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Wi-Fi stop failed: %s", esp_err_to_name(err));
+      s_radio_running = true;
+      s_radio_requested = true;
+    } else {
+      s_radio_running = false;
+    }
+  }
+  xSemaphoreGive(s_power_mutex);
+}
+
+bool wifi_wait_connected(uint32_t timeout_ms) {
+  if (wifi_is_connected()) return true;
+  EventBits_t bits = xEventGroupWaitBits(
+      s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
+      pdMS_TO_TICKS(timeout_ms));
+  return (bits & WIFI_CONNECTED_BIT) != 0 || wifi_is_connected();
 }
 
 bool wifi_is_connected(void) { return s_is_connected; }
@@ -149,9 +216,13 @@ esp_err_t wifi_connect_to_ap(const char *ssid, const char *password) {
   if (ssid == NULL || password == NULL) {
     return ESP_ERR_INVALID_ARG;
   }
+  if (!s_radio_running) return ESP_ERR_INVALID_STATE;
 
   s_connection_state = WIFI_CONNECTION_CONNECTING;
   s_retry_num = 0; // Reset retries
+  s_is_connected = false;
+  xEventGroupClearBits(s_wifi_event_group,
+                       WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
   wifi_config_t wifi_config = {
       .sta =
@@ -261,8 +332,6 @@ bool wifi_has_saved_credentials(const char *ssid) {
 // --- Centralized HTTP Logic ---
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
-#include "freertos/semphr.h"
-
 static SemaphoreHandle_t s_http_mutex = NULL;
 
 static void ensure_http_mutex(void) {
@@ -521,6 +590,7 @@ static void scan_task_wrapper(void *param) {
     if (results)
       free(results);
     s_scan_state = WIFI_SCAN_FAILED;
+    wifi_power_release(WIFI_POWER_SCAN);
     vTaskDelete(NULL);
     return;
   }
@@ -539,6 +609,7 @@ static void scan_task_wrapper(void *param) {
     s_scan_state = WIFI_SCAN_FAILED;
   }
 
+  wifi_power_release(WIFI_POWER_SCAN);
   vTaskDelete(NULL);
 }
 
@@ -551,12 +622,16 @@ esp_err_t wifi_start_scan(void) {
     s_scan_mutex = xSemaphoreCreateMutex();
   }
 
+  esp_err_t hold_err = wifi_power_acquire(WIFI_POWER_SCAN);
+  if (hold_err != ESP_OK) return hold_err;
+
   s_scan_state = WIFI_SCANNING;
 
   BaseType_t ret =
       xTaskCreate(scan_task_wrapper, "wifi_scan", 4096, NULL, 5, NULL);
   if (ret != pdPASS) {
     s_scan_state = WIFI_SCAN_FAILED;
+    wifi_power_release(WIFI_POWER_SCAN);
     return ESP_FAIL;
   }
 

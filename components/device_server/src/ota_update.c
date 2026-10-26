@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
+#include "wifi_connect.h"
 #include <string.h>
 
 static const char *TAG = "OTA";
@@ -138,6 +139,7 @@ done:
     esp_restart();
   }
   set_result("failed", err, false);
+  wifi_power_release(WIFI_POWER_OTA);
 }
 
 static void upload_worker(void *arg) {
@@ -183,6 +185,13 @@ static esp_err_t upload_handler(httpd_req_t *req) {
     httpd_resp_send_custom_err(req, "409 Conflict", "Another update is in progress");
     return ESP_FAIL;
   }
+  err = wifi_power_acquire(WIFI_POWER_OTA);
+  if (err != ESP_OK) {
+    set_result("failed", err, false);
+    httpd_resp_send_custom_err(req, "503 Service Unavailable",
+                               "Cannot keep Wi-Fi on for upload");
+    return ESP_FAIL;
+  }
   httpd_req_t *async_req = NULL;
   err = httpd_req_async_handler_begin(req, &async_req);
   if (err == ESP_OK) {
@@ -191,6 +200,7 @@ static esp_err_t upload_handler(httpd_req_t *req) {
     return ESP_OK;
   }
   set_result("failed", err, false);
+  wifi_power_release(WIFI_POWER_OTA);
   ESP_LOGW(TAG, "Cannot allocate asynchronous upload request: %s", esp_err_to_name(err));
   httpd_resp_send_custom_err(req, "503 Service Unavailable", "Cannot allocate upload request; check /status heap values");
   return ESP_FAIL;

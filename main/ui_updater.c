@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "network_sync.h"
 #include "stock_monitor.h"
 #include "time_manager.h"
 #include "ui.h"
@@ -711,6 +712,21 @@ static void check_wifi_connection_status(void) {
 #define TAB_IDX_WEATHER 2
 #define TAB_IDX_SETTINGS 3
 
+static bool s_network_ui_wifi_held;
+
+static void set_network_ui_wifi_hold(bool held) {
+  if (held == s_network_ui_wifi_held) return;
+  if (held) {
+    if (wifi_power_acquire(WIFI_POWER_NETWORK_UI) == ESP_OK)
+      s_network_ui_wifi_held = true;
+    else
+      ESP_LOGW(TAG, "Could not keep Wi-Fi on for Network tab");
+  } else {
+    wifi_power_release(WIFI_POWER_NETWORK_UI);
+    s_network_ui_wifi_held = false;
+  }
+}
+
 // Helper: navigate to Screen2 and select a specific tab
 static void navigate_to_screen2_tab(uint32_t tab_idx) {
   _ui_screen_change(&ui_Screen2, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0,
@@ -718,6 +734,7 @@ static void navigate_to_screen2_tab(uint32_t tab_idx) {
   if (ui_TabView1) {
     lv_tabview_set_active(ui_TabView1, tab_idx, LV_ANIM_OFF);
   }
+  set_network_ui_wifi_hold(tab_idx == TAB_IDX_NETWORK);
   // Show/hide keyboard based on target tab
   if (ui_Keyboard) {
     if (tab_idx == TAB_IDX_SETTINGS) {
@@ -751,6 +768,7 @@ static void ui_event_CancelButton_HideExtras(lv_event_t *e) {
 
     _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0,
                       &ui_Screen1_screen_init);
+    set_network_ui_wifi_hold(false);
   }
 }
 
@@ -809,6 +827,7 @@ static void ui_event_TabView_ValueChanged(lv_event_t *e) {
   lv_event_code_t event_code = lv_event_get_code(e);
   if (event_code == LV_EVENT_VALUE_CHANGED) {
     uint32_t active_tab = lv_tabview_get_tab_active(ui_TabView1);
+    set_network_ui_wifi_hold(active_tab == TAB_IDX_NETWORK);
     if (ui_Keyboard) {
       if (active_tab == TAB_IDX_SETTINGS) {
         lv_obj_add_flag(ui_Keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -987,7 +1006,12 @@ static void ui_event_ButtonStockOK(lv_event_t *e) {
       ESP_LOGI(TAG, "Setting stock slot %d to: %s", s_stock_edit_slot, ticker);
 
       // Set the new symbol
-      stock_set_symbol(s_stock_edit_slot, ticker);
+      esp_err_t save_err = stock_set_symbol(s_stock_edit_slot, ticker);
+      if (save_err != ESP_OK) {
+        if (ui_LabelStockStatus)
+          lv_label_set_text(ui_LabelStockStatus, "Save failed");
+        return;
+      }
 
       // Update the UI label immediately
       if (s_stock_edit_slot == 1) {
@@ -1038,7 +1062,7 @@ static void ui_event_ButtonStockOK(lv_event_t *e) {
       }
 
       // Trigger immediate refresh of stock data
-      stock_trigger_refresh();
+      network_sync_request(NETWORK_SYNC_STOCKS);
     } else {
       if (ui_LabelStockStatus) {
         lv_label_set_text(ui_LabelStockStatus, "Enter ticker");
@@ -1100,7 +1124,13 @@ static void ui_event_ButtonWeatherOK(lv_event_t *e) {
       }
 
       // Queue async city lookup (non-blocking)
-      weather_set_city(city);
+      esp_err_t city_err = weather_set_city(city);
+      if (city_err != ESP_OK) {
+        if (ui_LabelWeatherStatus)
+          lv_label_set_text(ui_LabelWeatherStatus, "Request failed");
+        return;
+      }
+      network_sync_request(NETWORK_SYNC_WEATHER);
 
       // Reset all weather day labels to placeholders while lookup in progress
       for (int i = 0; i < 5; i++) {

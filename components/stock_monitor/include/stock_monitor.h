@@ -31,21 +31,12 @@ typedef struct {
 } stock_values_t;
 
 /**
- * @brief Task for monitoring stock prices
- *
- * Fetches data from Finnhub API every 5 minutes.
- */
-void stock_monitor_task(void *pvParameters);
-
-/**
  * @brief Initialize stock monitor (mutex, load symbols from NVS)
  */
 void stock_monitor_init(void);
 
-/**
- * @brief Start the stock monitor background task
- */
-void stock_monitor_start(void);
+/** Fetch both configured stock quotes. Call from the network sync task. */
+esp_err_t stock_monitor_refresh(void);
 
 /**
  * @brief Get the latest cached stock values in a thread-safe manner
@@ -75,10 +66,6 @@ int64_t stock_get_last_updated_time(void);
  */
 esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data);
 
-/**
- * @brief Trigger an immediate stock data refresh
- */
-void stock_trigger_refresh(void);
 /**
  * @brief Set the stock symbol for a specific slot
  * @param slot 1 or 2

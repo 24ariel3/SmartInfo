@@ -44,10 +44,8 @@ typedef struct {
  */
 esp_err_t weather_init(void);
 
-/**
- * @brief Start the background task that fetches weather data periodically
- */
-void weather_start_task(void);
+/** Fetch weather and process one queued city lookup. Call from network sync. */
+esp_err_t weather_refresh(void);
 
 /**
  * @brief Get the latest weather data from the internal cache (thread-safe,
@@ -105,11 +103,6 @@ int weather_get_city_lookup_result(void);
  * @return true if lookup is in progress
  */
 bool weather_is_city_lookup_pending(void);
-
-/**
- * @brief Trigger immediate weather data refresh
- */
-void weather_trigger_refresh(void);
 
 #ifdef __cplusplus
 }

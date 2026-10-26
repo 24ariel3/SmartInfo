@@ -15,6 +15,7 @@
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "network_sync.h"
 #include "stock_monitor.h"
 #include "time_manager.h"
 #include "ui.h"
@@ -157,19 +158,25 @@ void app_main(void) {
     ESP_LOGW(TAG, "Device server unavailable: %s", esp_err_to_name(ret));
   }
 
-  // Start network fetchers after the UI and device server finish allocating RAM.
-  weather_start_task();
-  stock_monitor_start();
+  // Keep Wi-Fi available through OTA boot verification and the first sync.
+  esp_err_t startup_wifi_err = wifi_power_acquire(WIFI_POWER_STARTUP);
+  esp_err_t sync_err = network_sync_start();
+  if (startup_wifi_err != ESP_OK)
+    ESP_LOGE(TAG, "Cannot hold Wi-Fi during startup: %s",
+             esp_err_to_name(startup_wifi_err));
+  if (sync_err != ESP_OK)
+    ESP_LOGE(TAG, "Cannot start network sync: %s", esp_err_to_name(sync_err));
 
   vTaskDelay(pdMS_TO_TICKS(30000));
   int64_t sensor_ts = bsec_get_last_updated_time();
   bool healthy = ret == ESP_OK && display_get_handle() != NULL && sensor_ts > 0 &&
-                 esp_timer_get_time() - sensor_ts <= 10LL * 1000000;
+                 esp_timer_get_time() - sensor_ts <= 10LL * 1000000 &&
+                 startup_wifi_err == ESP_OK && sync_err == ESP_OK;
   ESP_ERROR_CHECK(device_server_confirm_boot(healthy));
 
-  // Main task has nothing else to do - it can sleep or be deleted
-  // The UI updates are now handled by the LVGL timer inside the display task
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(10000)); // Sleep, nothing to do here
-  }
+  // Leave the startup Wi-Fi hold for a total of 60 seconds, then idle Wi-Fi
+  // between scheduled sync windows.
+  vTaskDelay(pdMS_TO_TICKS(30000));
+  wifi_power_release(WIFI_POWER_STARTUP);
+  vTaskDelete(NULL);
 }

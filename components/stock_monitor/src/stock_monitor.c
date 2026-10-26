@@ -106,14 +106,6 @@ static int64_t s_last_update_ts = 0;
 
 int64_t stock_get_last_updated_time(void) { return s_last_update_ts; }
 
-// Refresh flag
-static volatile bool s_refresh_requested = false;
-
-void stock_trigger_refresh(void) {
-  s_refresh_requested = true;
-  ESP_LOGI(TAG, "Stock refresh requested");
-}
-
 esp_err_t stock_get_latest_values(stock_values_t *out_values,
                                   bool *is_updated) {
   if (!stock_mutex)
@@ -167,10 +159,20 @@ void stock_load_symbols_from_nvs(void) {
 }
 
 void stock_save_symbols_to_nvs(void) {
+  char symbol_1[sizeof(s_stock_symbol_1)];
+  char symbol_2[sizeof(s_stock_symbol_2)];
+  if (stock_mutex && xSemaphoreTake(stock_mutex, portMAX_DELAY) == pdTRUE) {
+    memcpy(symbol_1, s_stock_symbol_1, sizeof(symbol_1));
+    memcpy(symbol_2, s_stock_symbol_2, sizeof(symbol_2));
+    xSemaphoreGive(stock_mutex);
+  } else {
+    return;
+  }
+
   nvs_handle_t handle;
   if (nvs_open(STOCK_NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
-    nvs_set_str(handle, STOCK_NVS_KEY_SYM1, s_stock_symbol_1);
-    nvs_set_str(handle, STOCK_NVS_KEY_SYM2, s_stock_symbol_2);
+    nvs_set_str(handle, STOCK_NVS_KEY_SYM1, symbol_1);
+    nvs_set_str(handle, STOCK_NVS_KEY_SYM2, symbol_2);
     nvs_commit(handle);
     nvs_close(handle);
     ESP_LOGI(TAG, "Saved symbols to NVS");
@@ -183,13 +185,11 @@ esp_err_t stock_set_symbol(int slot, const char *symbol) {
   if (strlen(symbol) >= 16)
     return ESP_ERR_INVALID_SIZE;
 
-  if (slot == 1) {
-    strncpy(s_stock_symbol_1, symbol, sizeof(s_stock_symbol_1) - 1);
-    s_stock_symbol_1[sizeof(s_stock_symbol_1) - 1] = '\0';
-  } else {
-    strncpy(s_stock_symbol_2, symbol, sizeof(s_stock_symbol_2) - 1);
-    s_stock_symbol_2[sizeof(s_stock_symbol_2) - 1] = '\0';
-  }
+  if (!stock_mutex || xSemaphoreTake(stock_mutex, portMAX_DELAY) != pdTRUE)
+    return ESP_ERR_INVALID_STATE;
+  char *target = (slot == 1) ? s_stock_symbol_1 : s_stock_symbol_2;
+  strlcpy(target, symbol, 16);
+  xSemaphoreGive(stock_mutex);
 
   stock_save_symbols_to_nvs();
   return ESP_OK;
@@ -199,9 +199,12 @@ esp_err_t stock_get_symbol(int slot, char *out_symbol, size_t len) {
   if (slot < 1 || slot > 2 || !out_symbol || len == 0)
     return ESP_ERR_INVALID_ARG;
 
+  if (!stock_mutex || xSemaphoreTake(stock_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
   const char *src = (slot == 1) ? s_stock_symbol_1 : s_stock_symbol_2;
   strncpy(out_symbol, src, len - 1);
   out_symbol[len - 1] = '\0';
+  xSemaphoreGive(stock_mutex);
   return ESP_OK;
 }
 
@@ -213,71 +216,42 @@ void stock_monitor_init(void) {
   stock_load_symbols_from_nvs();
 }
 
-void stock_monitor_task(void *pvParameters) {
+esp_err_t stock_monitor_refresh(void) {
+  if (!stock_mutex) return ESP_ERR_INVALID_STATE;
 
-  // Wait for WiFi
-  while (!wifi_is_connected()) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+  char symbol_1[sizeof(s_stock_symbol_1)];
+  char symbol_2[sizeof(s_stock_symbol_2)];
+  if (xSemaphoreTake(stock_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  memcpy(symbol_1, s_stock_symbol_1, sizeof(symbol_1));
+  memcpy(symbol_2, s_stock_symbol_2, sizeof(symbol_2));
+  xSemaphoreGive(stock_mutex);
+
+  stock_data_t data1 = {0};
+  stock_data_t data2 = {0};
+  bool ok1 = stock_fetch_price(symbol_1, &data1) == ESP_OK;
+  if (!ok1) ESP_LOGW(TAG, "Failed to fetch %s", symbol_1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  bool ok2 = stock_fetch_price(symbol_2, &data2) == ESP_OK;
+  if (!ok2) ESP_LOGW(TAG, "Failed to fetch %s", symbol_2);
+
+  bool updated = false;
+  if (xSemaphoreTake(stock_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  if (ok1 && strcmp(s_stock_symbol_1, symbol_1) == 0) {
+    stock_cache.stock_1 = data1;
+    updated = true;
   }
-
-  while (1) {
-    stock_data_t data1 = {0};
-    stock_data_t data2 = {0};
-    bool ok1 = false;
-    bool ok2 = false;
-
-    // Fetch Stock 1
-    ESP_LOGI(TAG, "Fetching stock: %s", s_stock_symbol_1);
-    if (stock_fetch_price(s_stock_symbol_1, &data1) == ESP_OK) {
-      ok1 = true;
-    } else {
-      ESP_LOGW(TAG, "Failed to fetch %s", s_stock_symbol_1);
-    }
-
-    // Small delay between requests to be nice to API
-    // Also gives the mutex a chance to be taken by weather task if it's waiting
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    // Fetch Stock 2
-    ESP_LOGI(TAG, "Fetching stock: %s", s_stock_symbol_2);
-    if (stock_fetch_price(s_stock_symbol_2, &data2) == ESP_OK) {
-      ok2 = true;
-    } else {
-      ESP_LOGW(TAG, "Failed to fetch %s", s_stock_symbol_2);
-    }
-
-    // ... existing code ...
-
-    if (ok1 || ok2) {
-      if (stock_mutex &&
-          xSemaphoreTake(stock_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (ok1)
-          stock_cache.stock_1 = data1;
-        if (ok2)
-          stock_cache.stock_2 = data2;
-        stock_cache.last_update_time_us = esp_timer_get_time();
-        s_last_update_ts = stock_cache.last_update_time_us;
-        xSemaphoreGive(stock_mutex);
-        ESP_LOGI(TAG, "Stock cache updated");
-      }
-    }
-
-    ESP_LOGI(TAG, "Stock Stack Remaining: %lu bytes\n",
-             (unsigned long)uxTaskGetStackHighWaterMark(NULL));
-    // Wait 5 minutes, but check for refresh requests
-    int wait_count = 0;
-    while (wait_count < 300 && !s_refresh_requested) {
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      wait_count++;
-    }
-    s_refresh_requested = false; // Clear the flag
+  if (ok2 && strcmp(s_stock_symbol_2, symbol_2) == 0) {
+    stock_cache.stock_2 = data2;
+    updated = true;
   }
-}
-
-void stock_monitor_start(void) {
-  if (stock_mutex == NULL) {
-    stock_monitor_init();
+  if (updated) {
+    stock_cache.last_update_time_us = esp_timer_get_time();
+    s_last_update_ts = stock_cache.last_update_time_us;
   }
-  xTaskCreatePinnedToCore(stock_monitor_task, "stock_mon", 6144, NULL, 1, NULL,
-                          0);
+  xSemaphoreGive(stock_mutex);
+
+  if (updated) ESP_LOGI(TAG, "Stock cache updated");
+  return updated ? ESP_OK : ESP_FAIL;
 }

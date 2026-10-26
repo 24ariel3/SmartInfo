@@ -27,6 +27,10 @@ static lv_display_t *disp = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_touch_handle_t tp = NULL;
+static uint8_t s_selected_brightness = DISPLAY_BACKLIGHT_DEFAULT;
+static int s_applied_brightness = -1;
+#define DISPLAY_IDLE_DIM_MS 60000
+#define DISPLAY_IDLE_BRIGHTNESS_MAX 20
 
 // Backlight PWM Configuration
 #ifdef BSP_LCD_BACKLIGHT
@@ -109,10 +113,25 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area,
                             offsety2 + 1, px_map);
 }
 
-// Tick Timer for LVGL
-static void increase_lvgl_tick(void *arg) {
-  // Tell LVGL how much time has passed
-  lv_tick_inc(2); // 2ms period
+static uint32_t lvgl_tick_get_cb(void) {
+  return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static void apply_brightness(bool idle) {
+#ifdef BSP_LCD_BACKLIGHT
+  uint8_t percent = s_selected_brightness;
+  if (idle && percent > DISPLAY_IDLE_BRIGHTNESS_MAX)
+    percent = DISPLAY_IDLE_BRIGHTNESS_MAX;
+  if (s_applied_brightness == percent) return;
+
+  uint32_t duty = (1023 * percent) / 100;
+  ledc_set_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL, duty);
+  ledc_update_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL);
+  s_applied_brightness = percent;
+  ESP_LOGI(TAG, "Backlight set to %u%% (Duty: %" PRIu32 ")", percent, duty);
+#else
+  (void)idle;
+#endif
 }
 
 // Main LVGL Task
@@ -127,6 +146,8 @@ static void lvgl_task(void *arg) {
     if (display_lock(10)) { // Try for 10ms instead of blocking forever
       int64_t start = esp_timer_get_time();
       delay_ms = lv_timer_handler();
+      uint32_t idle_ms = disp ? lv_display_get_inactive_time(disp) : 0;
+      apply_brightness(idle_ms >= DISPLAY_IDLE_DIM_MS);
       display_unlock();
       int64_t duration = esp_timer_get_time() - start;
 
@@ -147,17 +168,17 @@ static void lvgl_task(void *arg) {
         ESP_LOGW(TAG, "LVGL Handler took %d ms", (int)(duration / 1000));
       }
 
-      if (delay_ms == 0)
-        delay_ms = 1;
-      if (delay_ms > 33)
-        delay_ms = 33; // Cap at 33ms (~30FPS)
+      if (delay_ms == 0) delay_ms = 1;
+      uint32_t max_delay = idle_ms >= DISPLAY_IDLE_DIM_MS ? 100 : 33;
+      if (delay_ms > max_delay) delay_ms = max_delay;
     } else {
       // FAILED to get lock - someone else has it
       // ESP_LOGW(TAG, "LVGL task couldn't get lock, yielding");
       delay_ms = 10; // Wait 10ms before retry
     }
 
-    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    TickType_t delay_ticks = pdMS_TO_TICKS(delay_ms);
+    vTaskDelay(delay_ticks == 0 ? 1 : delay_ticks);
   }
 }
 
@@ -323,8 +344,7 @@ esp_err_t display_init(void) {
       .hpoint = 0,
   };
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
-  // Set initial brightness
-  display_set_brightness(DISPLAY_BACKLIGHT_DEFAULT);
+  apply_brightness(false);
 #endif
 
   // Create mutex
@@ -424,6 +444,7 @@ esp_err_t display_init(void) {
   // Initialize LVGL
   ESP_LOGI(TAG, "Initializing LVGL...");
   lv_init();
+  lv_tick_set_cb(lvgl_tick_get_cb);
 
   // Create a display
   disp = lv_display_create(BSP_LCD_H_RES, BSP_LCD_V_RES);
@@ -450,14 +471,6 @@ esp_err_t display_init(void) {
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, lvgl_touch_read_cb);
 
-  // Register Tick Timer
-  ESP_LOGI(TAG, "Install LVGL tick timer");
-  const esp_timer_create_args_t lvgl_tick_timer_args = {
-      .callback = &increase_lvgl_tick, .name = "lvgl_tick"};
-  esp_timer_handle_t lvgl_tick_timer = NULL;
-  ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
-  ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 2000)); // 2ms
-
   // Create LVGL Task
   // Priority 5 (Normal), Core 1 (App Core)
   xTaskCreatePinnedToCore(lvgl_task, "LVGL", 8192, NULL, 5, NULL, 1);
@@ -481,18 +494,9 @@ void display_unlock(void) {
 }
 
 void display_set_brightness(uint8_t percent) {
-#ifdef BSP_LCD_BACKLIGHT
   if (percent > 100)
     percent = 100;
-
-  // Calculate duty cycle (Resolution is 10-bit: 0-1023)
-  uint32_t duty = (1023 * percent) / 100;
-
-  ledc_set_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL, duty);
-  ledc_update_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL);
-  ESP_LOGI(TAG, "Backlight set to %d%% (Duty: %" PRIu32 ")", percent, duty);
-#else
-  ESP_LOGW(TAG,
-           "Backlight control not available (BSP_LCD_BACKLIGHT not defined)");
-#endif
+  s_selected_brightness = percent;
+  uint32_t idle_ms = disp ? lv_display_get_inactive_time(disp) : 0;
+  apply_brightness(idle_ms >= DISPLAY_IDLE_DIM_MS);
 }
