@@ -198,6 +198,13 @@ Pin mappings are defined in `components/bsp/include/bsp.h`. standard configurati
 - **I2C SDA:** GPIO 21
 - **I2C SCL:** GPIO 22
 - **Battery sense:** GPIO 34 (ADC1 channel 6, `BSP_BAT_SENSE`), white wire from the divider midpoint.
+- **Charger sense:** GPIO 35 (ADC1 channel 7, `BSP_CHARGER_SENSE`), from the charger VIN divider midpoint.
+
+### Battery Runtime and Charger Sense
+
+The battery voltage divider uses 100 kΩ from battery BAT+ to GPIO 34 and 100 kΩ from GPIO 34 to GND, with a 100 nF capacitor from GPIO 34 to GND. The charger detector uses the external charger VIN: connect VIN through 100 kΩ to GPIO 35, then connect 33 kΩ and 100 nF from GPIO 35 to common GND. Share GND between the charger, shield, and ESP32. Never connect charger VIN directly to an ESP32 GPIO.
+
+The firmware samples charger presence once per second and requires two consecutive readings beyond its 0.8 V connected / 0.4 V disconnected thresholds. The current and previous battery-run counters are displayed as `HH:MM:SS`; NVS stores them once per minute and on charger-state changes. While charging, the raw-voltage label shows `Charging`; the percentage remains voltage-based.
 
 ### BME680 Wiring
 

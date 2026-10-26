@@ -54,11 +54,22 @@ lv_obj_t * ui_ContainerSwttingsBrightness = NULL;
 lv_obj_t * ui_LabelSettingsBrightness = NULL;
 lv_obj_t * ui_SliderSettingsScreenBrightness = NULL;
 lv_obj_t * ui_ContainerSettingsBattery = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryLevel = NULL;
 lv_obj_t * ui_LabelSettingsBatteryLevel = NULL;
-lv_obj_t * ui_ContainerSettingsBatteryLevelPercentage = NULL;
-lv_obj_t * ui_LabelSettingsBatteryLevelPercentage = NULL;
 lv_obj_t * ui_ContainerSettingsBatteryLevelRaw = NULL;
 lv_obj_t * ui_LabelSettingsBatteryLevelRaw = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryLevelPercentage = NULL;
+lv_obj_t * ui_LabelSettingsBatteryLevelPercentage = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryTime = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryTimeString = NULL;
+lv_obj_t * ui_LabelSettingBatterTimeString = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryTimeCounter = NULL;
+lv_obj_t * ui_LabelSettingsBatteryTimeCounter = NULL;
+lv_obj_t * ui_ContainerSettingsPrevBatteryTime = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryPrevTimeString = NULL;
+lv_obj_t * ui_LabelSettingBatteryPrevTimeString = NULL;
+lv_obj_t * ui_ContainerSettingsBatteryPrevTimeCounter = NULL;
+lv_obj_t * ui_LabelSettingsBatteryPrevTimeCounter = NULL;
 lv_obj_t * ui_Keyboard = NULL;
 // event funtions
 
@@ -584,20 +595,42 @@ void ui_Screen2_screen_init(void)
     lv_obj_set_width(ui_ContainerSettingsBattery, 240);
     lv_obj_set_height(ui_ContainerSettingsBattery, 35);
     lv_obj_set_x(ui_ContainerSettingsBattery, 0);
-    lv_obj_set_y(ui_ContainerSettingsBattery, 37);
+    lv_obj_set_y(ui_ContainerSettingsBattery, 35);
     lv_obj_remove_flag(ui_ContainerSettingsBattery, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_obj_set_style_pad_left(ui_ContainerSettingsBattery, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_right(ui_ContainerSettingsBattery, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_top(ui_ContainerSettingsBattery, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_bottom(ui_ContainerSettingsBattery, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_LabelSettingsBatteryLevel = lv_label_create(ui_ContainerSettingsBattery);
+    ui_ContainerSettingsBatteryLevel = lv_obj_create(ui_ContainerSettingsBattery);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryLevel);
+    lv_obj_set_width(ui_ContainerSettingsBatteryLevel, 100);
+    lv_obj_set_height(ui_ContainerSettingsBatteryLevel, 50);
+    lv_obj_set_align(ui_ContainerSettingsBatteryLevel, LV_ALIGN_LEFT_MID);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryLevel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelSettingsBatteryLevel = lv_label_create(ui_ContainerSettingsBatteryLevel);
     lv_obj_set_width(ui_LabelSettingsBatteryLevel, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_LabelSettingsBatteryLevel, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_LabelSettingsBatteryLevel, LV_ALIGN_LEFT_MID);
     lv_label_set_text(ui_LabelSettingsBatteryLevel, "Battery");
     lv_obj_set_style_text_color(ui_LabelSettingsBatteryLevel, lv_color_hex(0xBBDED6), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_LabelSettingsBatteryLevel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ContainerSettingsBatteryLevelRaw = lv_obj_create(ui_ContainerSettingsBattery);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryLevelRaw);
+    lv_obj_set_width(ui_ContainerSettingsBatteryLevelRaw, 100);
+    lv_obj_set_height(ui_ContainerSettingsBatteryLevelRaw, 50);
+    lv_obj_set_align(ui_ContainerSettingsBatteryLevelRaw, LV_ALIGN_CENTER);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryLevelRaw, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelSettingsBatteryLevelRaw = lv_label_create(ui_ContainerSettingsBatteryLevelRaw);
+    lv_obj_set_width(ui_LabelSettingsBatteryLevelRaw, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_LabelSettingsBatteryLevelRaw, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_LabelSettingsBatteryLevelRaw, LV_ALIGN_CENTER);
+    lv_label_set_text(ui_LabelSettingsBatteryLevelRaw, "--");
+    lv_obj_set_style_text_color(ui_LabelSettingsBatteryLevelRaw, lv_color_hex(0xBBDED6), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_LabelSettingsBatteryLevelRaw, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_ContainerSettingsBatteryLevelPercentage = lv_obj_create(ui_ContainerSettingsBattery);
     lv_obj_remove_style_all(ui_ContainerSettingsBatteryLevelPercentage);
@@ -611,25 +644,101 @@ void ui_Screen2_screen_init(void)
     lv_obj_set_width(ui_LabelSettingsBatteryLevelPercentage, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_LabelSettingsBatteryLevelPercentage, LV_SIZE_CONTENT);    /// 1
     lv_obj_set_align(ui_LabelSettingsBatteryLevelPercentage, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, "80%");
+    lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, "--");
     lv_obj_set_style_text_color(ui_LabelSettingsBatteryLevelPercentage, lv_color_hex(0xBBDED6),
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_LabelSettingsBatteryLevelPercentage, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_ContainerSettingsBatteryLevelRaw = lv_obj_create(ui_ContainerSettingsBattery);
-    lv_obj_remove_style_all(ui_ContainerSettingsBatteryLevelRaw);
-    lv_obj_set_width(ui_ContainerSettingsBatteryLevelRaw, 100);
-    lv_obj_set_height(ui_ContainerSettingsBatteryLevelRaw, 50);
-    lv_obj_set_align(ui_ContainerSettingsBatteryLevelRaw, LV_ALIGN_CENTER);
-    lv_obj_remove_flag(ui_ContainerSettingsBatteryLevelRaw, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    ui_ContainerSettingsBatteryTime = lv_obj_create(ui_TabPageSettings);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryTime);
+    lv_obj_set_width(ui_ContainerSettingsBatteryTime, 240);
+    lv_obj_set_height(ui_ContainerSettingsBatteryTime, 35);
+    lv_obj_set_x(ui_ContainerSettingsBatteryTime, 0);
+    lv_obj_set_y(ui_ContainerSettingsBatteryTime, 70);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryTime, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_pad_left(ui_ContainerSettingsBatteryTime, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_right(ui_ContainerSettingsBatteryTime, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_top(ui_ContainerSettingsBatteryTime, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_bottom(ui_ContainerSettingsBatteryTime, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_LabelSettingsBatteryLevelRaw = lv_label_create(ui_ContainerSettingsBatteryLevelRaw);
-    lv_obj_set_width(ui_LabelSettingsBatteryLevelRaw, LV_SIZE_CONTENT);   /// 1
-    lv_obj_set_height(ui_LabelSettingsBatteryLevelRaw, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_align(ui_LabelSettingsBatteryLevelRaw, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_LabelSettingsBatteryLevelRaw, "3500mv");
-    lv_obj_set_style_text_color(ui_LabelSettingsBatteryLevelRaw, lv_color_hex(0xBBDED6), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_opa(ui_LabelSettingsBatteryLevelRaw, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    ui_ContainerSettingsBatteryTimeString = lv_obj_create(ui_ContainerSettingsBatteryTime);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryTimeString);
+    lv_obj_set_width(ui_ContainerSettingsBatteryTimeString, 150);
+    lv_obj_set_height(ui_ContainerSettingsBatteryTimeString, 50);
+    lv_obj_set_align(ui_ContainerSettingsBatteryTimeString, LV_ALIGN_LEFT_MID);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryTimeString,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelSettingBatterTimeString = lv_label_create(ui_ContainerSettingsBatteryTimeString);
+    lv_obj_set_width(ui_LabelSettingBatterTimeString, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_LabelSettingBatterTimeString, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_LabelSettingBatterTimeString, LV_ALIGN_LEFT_MID);
+    lv_label_set_text(ui_LabelSettingBatterTimeString, "Time On Battery");
+    lv_obj_set_style_text_color(ui_LabelSettingBatterTimeString, lv_color_hex(0xBBDED6), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_LabelSettingBatterTimeString, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ContainerSettingsBatteryTimeCounter = lv_obj_create(ui_ContainerSettingsBatteryTime);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryTimeCounter);
+    lv_obj_set_width(ui_ContainerSettingsBatteryTimeCounter, 80);
+    lv_obj_set_height(ui_ContainerSettingsBatteryTimeCounter, 50);
+    lv_obj_set_align(ui_ContainerSettingsBatteryTimeCounter, LV_ALIGN_RIGHT_MID);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryTimeCounter,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelSettingsBatteryTimeCounter = lv_label_create(ui_ContainerSettingsBatteryTimeCounter);
+    lv_obj_set_width(ui_LabelSettingsBatteryTimeCounter, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_LabelSettingsBatteryTimeCounter, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_LabelSettingsBatteryTimeCounter, LV_ALIGN_CENTER);
+    lv_label_set_text(ui_LabelSettingsBatteryTimeCounter, "00:00:00");
+    lv_obj_set_style_text_color(ui_LabelSettingsBatteryTimeCounter, lv_color_hex(0xBBDED6),
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_LabelSettingsBatteryTimeCounter, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ContainerSettingsPrevBatteryTime = lv_obj_create(ui_TabPageSettings);
+    lv_obj_remove_style_all(ui_ContainerSettingsPrevBatteryTime);
+    lv_obj_set_width(ui_ContainerSettingsPrevBatteryTime, 240);
+    lv_obj_set_height(ui_ContainerSettingsPrevBatteryTime, 35);
+    lv_obj_set_x(ui_ContainerSettingsPrevBatteryTime, 0);
+    lv_obj_set_y(ui_ContainerSettingsPrevBatteryTime, 105);
+    lv_obj_remove_flag(ui_ContainerSettingsPrevBatteryTime, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_pad_left(ui_ContainerSettingsPrevBatteryTime, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_right(ui_ContainerSettingsPrevBatteryTime, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_top(ui_ContainerSettingsPrevBatteryTime, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_bottom(ui_ContainerSettingsPrevBatteryTime, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ContainerSettingsBatteryPrevTimeString = lv_obj_create(ui_ContainerSettingsPrevBatteryTime);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryPrevTimeString);
+    lv_obj_set_width(ui_ContainerSettingsBatteryPrevTimeString, 150);
+    lv_obj_set_height(ui_ContainerSettingsBatteryPrevTimeString, 50);
+    lv_obj_set_align(ui_ContainerSettingsBatteryPrevTimeString, LV_ALIGN_LEFT_MID);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryPrevTimeString,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelSettingBatteryPrevTimeString = lv_label_create(ui_ContainerSettingsBatteryPrevTimeString);
+    lv_obj_set_width(ui_LabelSettingBatteryPrevTimeString, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_LabelSettingBatteryPrevTimeString, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_LabelSettingBatteryPrevTimeString, LV_ALIGN_LEFT_MID);
+    lv_label_set_text(ui_LabelSettingBatteryPrevTimeString, "Prev Battery Time");
+    lv_obj_set_style_text_color(ui_LabelSettingBatteryPrevTimeString, lv_color_hex(0xBBDED6),
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_LabelSettingBatteryPrevTimeString, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ContainerSettingsBatteryPrevTimeCounter = lv_obj_create(ui_ContainerSettingsPrevBatteryTime);
+    lv_obj_remove_style_all(ui_ContainerSettingsBatteryPrevTimeCounter);
+    lv_obj_set_width(ui_ContainerSettingsBatteryPrevTimeCounter, 80);
+    lv_obj_set_height(ui_ContainerSettingsBatteryPrevTimeCounter, 50);
+    lv_obj_set_align(ui_ContainerSettingsBatteryPrevTimeCounter, LV_ALIGN_RIGHT_MID);
+    lv_obj_remove_flag(ui_ContainerSettingsBatteryPrevTimeCounter,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelSettingsBatteryPrevTimeCounter = lv_label_create(ui_ContainerSettingsBatteryPrevTimeCounter);
+    lv_obj_set_width(ui_LabelSettingsBatteryPrevTimeCounter, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_LabelSettingsBatteryPrevTimeCounter, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_LabelSettingsBatteryPrevTimeCounter, LV_ALIGN_CENTER);
+    lv_label_set_text(ui_LabelSettingsBatteryPrevTimeCounter, "00:00:00");
+    lv_obj_set_style_text_color(ui_LabelSettingsBatteryPrevTimeCounter, lv_color_hex(0xBBDED6),
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_LabelSettingsBatteryPrevTimeCounter, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_Keyboard = lv_keyboard_create(ui_Screen2);
     lv_obj_set_width(ui_Keyboard, 238);
@@ -705,11 +814,22 @@ void ui_Screen2_screen_destroy(void)
     ui_LabelSettingsBrightness = NULL;
     ui_SliderSettingsScreenBrightness = NULL;
     ui_ContainerSettingsBattery = NULL;
+    ui_ContainerSettingsBatteryLevel = NULL;
     ui_LabelSettingsBatteryLevel = NULL;
-    ui_ContainerSettingsBatteryLevelPercentage = NULL;
-    ui_LabelSettingsBatteryLevelPercentage = NULL;
     ui_ContainerSettingsBatteryLevelRaw = NULL;
     ui_LabelSettingsBatteryLevelRaw = NULL;
+    ui_ContainerSettingsBatteryLevelPercentage = NULL;
+    ui_LabelSettingsBatteryLevelPercentage = NULL;
+    ui_ContainerSettingsBatteryTime = NULL;
+    ui_ContainerSettingsBatteryTimeString = NULL;
+    ui_LabelSettingBatterTimeString = NULL;
+    ui_ContainerSettingsBatteryTimeCounter = NULL;
+    ui_LabelSettingsBatteryTimeCounter = NULL;
+    ui_ContainerSettingsPrevBatteryTime = NULL;
+    ui_ContainerSettingsBatteryPrevTimeString = NULL;
+    ui_LabelSettingBatteryPrevTimeString = NULL;
+    ui_ContainerSettingsBatteryPrevTimeCounter = NULL;
+    ui_LabelSettingsBatteryPrevTimeCounter = NULL;
     ui_Keyboard = NULL;
 
 }

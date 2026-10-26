@@ -32,6 +32,13 @@ static char s_cached_time[32] = "";
 static char s_cached_date[32] = "";
 static bool s_cached_wifi_connected = false;
 static bool s_first_run = true;
+static int s_battery_mv;
+static int s_battery_percent;
+static bool s_battery_sample_available;
+static uint64_t s_battery_current_seconds;
+static uint64_t s_battery_previous_seconds;
+static bool s_charger_state_known;
+static bool s_charger_connected;
 
 // Forward declaration
 static void check_wifi_scan_results(void);
@@ -312,6 +319,24 @@ static void update_sensor_ui(const bsec_values_t *data) {
   ESP_LOGD(TAG, "Sensor UI update took %lld us", esp_timer_get_time() - start);
 }
 
+static void set_label_text_if_changed(lv_obj_t *label, const char *text) {
+  if (label) {
+    const char *current = lv_label_get_text(label);
+    if (!current || strcmp(current, text) != 0) {
+      lv_label_set_text(label, text);
+    }
+  }
+}
+
+static void format_runtime(uint64_t total_seconds, char *buffer,
+                           size_t buffer_size) {
+  unsigned long long hours = (unsigned long long)(total_seconds / 3600ULL);
+  unsigned long long minutes = (unsigned long long)((total_seconds / 60ULL) % 60ULL);
+  unsigned long long seconds = (unsigned long long)(total_seconds % 60ULL);
+  snprintf(buffer, buffer_size, "%02llu:%02llu:%02llu", hours, minutes,
+           seconds);
+}
+
 // Update stock UI
 static void update_stock_ui(stock_values_t *data) {
   if (!data)
@@ -415,24 +440,40 @@ static void ui_update_timer_cb(lv_timer_t *timer) {
     }
   }
 
-  // Read battery status every 10 seconds using the existing UI timer.
+  // Charger state and battery runtime use the existing one-second UI timer.
+  esp_err_t runtime_err = battery_runtime_update(
+      &s_battery_current_seconds, &s_battery_previous_seconds,
+      &s_charger_connected);
+  if (runtime_err == ESP_OK) {
+    s_charger_state_known = true;
+  }
+
+  char runtime_buf[32];
+  format_runtime(s_battery_current_seconds, runtime_buf, sizeof(runtime_buf));
+  set_label_text_if_changed(ui_LabelSettingsBatteryTimeCounter, runtime_buf);
+  format_runtime(s_battery_previous_seconds, runtime_buf, sizeof(runtime_buf));
+  set_label_text_if_changed(ui_LabelSettingsBatteryPrevTimeCounter, runtime_buf);
+
+  // Keep voltage and percentage sampling on the existing 10-second cadence.
   static int64_t last_battery_sample_us = 0;
   int64_t now = esp_timer_get_time();
   if (s_first_run || now - last_battery_sample_us >= 10LL * 1000000) {
     last_battery_sample_us = now;
-    int battery_mv;
-    int battery_percent;
-    if (battery_read(&battery_mv, &battery_percent) == ESP_OK) {
+    if (battery_read(&s_battery_mv, &s_battery_percent) == ESP_OK) {
+      s_battery_sample_available = true;
       char battery_buf[16];
-      if (ui_LabelSettingsBatteryLevelPercentage) {
-        snprintf(battery_buf, sizeof(battery_buf), "%d%%", battery_percent);
-        lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, battery_buf);
-      }
-      if (ui_LabelSettingsBatteryLevelRaw) {
-        snprintf(battery_buf, sizeof(battery_buf), "%d mV", battery_mv);
-        lv_label_set_text(ui_LabelSettingsBatteryLevelRaw, battery_buf);
-      }
+      snprintf(battery_buf, sizeof(battery_buf), "%d%%", s_battery_percent);
+      set_label_text_if_changed(ui_LabelSettingsBatteryLevelPercentage,
+                                battery_buf);
     }
+  }
+
+  char battery_raw_buf[16];
+  if (s_charger_state_known && s_charger_connected) {
+    set_label_text_if_changed(ui_LabelSettingsBatteryLevelRaw, "Charging");
+  } else if (s_battery_sample_available) {
+    snprintf(battery_raw_buf, sizeof(battery_raw_buf), "%d mV", s_battery_mv);
+    set_label_text_if_changed(ui_LabelSettingsBatteryLevelRaw, battery_raw_buf);
   }
 
   // 2. Update Stock UI
@@ -1113,6 +1154,10 @@ void ui_updater_init(void) {
     lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, "--");
   if (ui_LabelSettingsBatteryLevelRaw)
     lv_label_set_text(ui_LabelSettingsBatteryLevelRaw, "--");
+  if (ui_LabelSettingsBatteryTimeCounter)
+    lv_label_set_text(ui_LabelSettingsBatteryTimeCounter, "00:00:00");
+  if (ui_LabelSettingsBatteryPrevTimeCounter)
+    lv_label_set_text(ui_LabelSettingsBatteryPrevTimeCounter, "00:00:00");
 
   // Initialize stock symbol labels from NVS (before WiFi)
   char sym1[16] = {0};
