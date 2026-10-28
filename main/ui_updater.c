@@ -466,6 +466,8 @@ static void ui_update_timer_cb(lv_timer_t *timer) {
       snprintf(battery_buf, sizeof(battery_buf), "%d%%", s_battery_percent);
       set_label_text_if_changed(ui_LabelSettingsBatteryLevelPercentage,
                                 battery_buf);
+      snprintf(battery_buf, sizeof(battery_buf), "%d", s_battery_percent);
+      set_label_text_if_changed(ui_LabelStatusbarBatteryLevel, battery_buf);
     }
   }
 
@@ -1180,6 +1182,8 @@ static void ui_event_ButtonWeatherOK(lv_event_t *e) {
 void ui_updater_init(void) {
   ESP_LOGI(TAG, "Initializing UI updater timer");
 
+  if (ui_LabelStatusbarBatteryLevel)
+    lv_label_set_text(ui_LabelStatusbarBatteryLevel, "--");
   if (ui_LabelSettingsBatteryLevelPercentage)
     lv_label_set_text(ui_LabelSettingsBatteryLevelPercentage, "--");
   if (ui_LabelSettingsBatteryLevelRaw)

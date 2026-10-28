@@ -208,9 +208,9 @@ The firmware samples charger presence once per second and requires two consecuti
 
 ### Battery Power Efficiency
 
-The display remains on. After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower) and the LVGL loop may sleep up to 100 ms; touch restores the selected brightness. LVGL time now comes directly from `esp_timer`, removing the recurring 2 ms tick timer.
+The display remains on. After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower), and LVGL changes both its refresh and touch-read timer periods from 33 ms to 100 ms. Touch IRQs wake the LVGL task immediately; interaction restores the 33 ms periods and selected brightness. LVGL time comes directly from `esp_timer`, with no recurring 2 ms tick timer.
 
-Wi-Fi starts on demand and is stopped when no owner needs it. Startup keeps it available for 60 seconds, stock quotes refresh every five minutes, weather refreshes hourly, and the network settings tab, scans, sync requests, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap. Automatic light sleep remains deferred; it needs separate validation with the LCD PWM and touch wake path.
+Wi-Fi sync runs once immediately after boot. With valid time, stock quotes then refresh at five-minute clock boundaries (`:00`, `:05`, and so on); weather and NTP join the hourly `:00` window. If time is unavailable, the scheduler retries on five-minute intervals until it can align to the clock. Manual sync requests can run immediately and share a Wi-Fi session with any pending work. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap. Automatic light sleep remains deferred; it needs separate validation with the LCD PWM and touch wake path.
 
 ### BME680 Wiring
 

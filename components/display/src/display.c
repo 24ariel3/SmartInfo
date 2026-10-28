@@ -27,10 +27,17 @@ static lv_display_t *disp = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_touch_handle_t tp = NULL;
+static lv_indev_t *s_touch_indev = NULL;
+static lv_timer_t *s_refresh_timer = NULL;
+static lv_timer_t *s_touch_read_timer = NULL;
+static TaskHandle_t s_lvgl_task_handle = NULL;
 static uint8_t s_selected_brightness = DISPLAY_BACKLIGHT_DEFAULT;
 static int s_applied_brightness = -1;
+static bool s_display_idle = false;
 #define DISPLAY_IDLE_DIM_MS 60000
 #define DISPLAY_IDLE_BRIGHTNESS_MAX 20
+#define DISPLAY_ACTIVE_PERIOD_MS 33
+#define DISPLAY_IDLE_PERIOD_MS 100
 
 // Backlight PWM Configuration
 #ifdef BSP_LCD_BACKLIGHT
@@ -61,6 +68,11 @@ static void IRAM_ATTR touch_isr_handler(void *arg) {
   if ((now - last_touch_isr_time) > TOUCH_DEBOUNCE_US) {
     touch_pending = true;
     last_touch_isr_time = now;
+    if (s_lvgl_task_handle) {
+      BaseType_t higher_priority_task_woken = pdFALSE;
+      vTaskNotifyGiveFromISR(s_lvgl_task_handle, &higher_priority_task_woken);
+      if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
+    }
   }
 }
 #endif
@@ -134,6 +146,24 @@ static void apply_brightness(bool idle) {
 #endif
 }
 
+static void set_display_idle(bool idle, bool wake_touch_timer) {
+  if (s_display_idle == idle) {
+    apply_brightness(idle);
+    return;
+  }
+
+  s_display_idle = idle;
+  uint32_t period_ms = idle ? DISPLAY_IDLE_PERIOD_MS : DISPLAY_ACTIVE_PERIOD_MS;
+  if (s_refresh_timer) lv_timer_set_period(s_refresh_timer, period_ms);
+  if (s_touch_read_timer) lv_timer_set_period(s_touch_read_timer, period_ms);
+  if (!idle && wake_touch_timer && s_touch_read_timer)
+    lv_timer_ready(s_touch_read_timer);
+
+  apply_brightness(idle);
+  ESP_LOGI(TAG, "Display %s: LVGL period=%" PRIu32 " ms", idle ? "idle" : "active",
+           period_ms);
+}
+
 // Main LVGL Task
 static void lvgl_task(void *arg) {
   ESP_LOGI(TAG, "Starting LVGL Task");
@@ -144,10 +174,19 @@ static void lvgl_task(void *arg) {
     uint32_t delay_ms = 5; // Default delay
 
     if (display_lock(10)) { // Try for 10ms instead of blocking forever
+#ifdef BSP_LCD_TOUCH_INT
+      bool touch_wakeup = touch_pending || gpio_get_level(BSP_LCD_TOUCH_INT) == 0;
+      if (touch_wakeup && disp) lv_display_trigger_activity(disp);
+#else
+      bool touch_wakeup = false;
+#endif
+      uint32_t idle_ms = disp ? lv_display_get_inactive_time(disp) : 0;
+      set_display_idle(idle_ms >= DISPLAY_IDLE_DIM_MS, touch_wakeup);
+
       int64_t start = esp_timer_get_time();
       delay_ms = lv_timer_handler();
-      uint32_t idle_ms = disp ? lv_display_get_inactive_time(disp) : 0;
-      apply_brightness(idle_ms >= DISPLAY_IDLE_DIM_MS);
+      idle_ms = disp ? lv_display_get_inactive_time(disp) : 0;
+      set_display_idle(idle_ms >= DISPLAY_IDLE_DIM_MS, false);
       display_unlock();
       int64_t duration = esp_timer_get_time() - start;
 
@@ -169,7 +208,8 @@ static void lvgl_task(void *arg) {
       }
 
       if (delay_ms == 0) delay_ms = 1;
-      uint32_t max_delay = idle_ms >= DISPLAY_IDLE_DIM_MS ? 100 : 33;
+      uint32_t max_delay = s_display_idle ? DISPLAY_IDLE_PERIOD_MS
+                                          : DISPLAY_ACTIVE_PERIOD_MS;
       if (delay_ms > max_delay) delay_ms = max_delay;
     } else {
       // FAILED to get lock - someone else has it
@@ -178,7 +218,7 @@ static void lvgl_task(void *arg) {
     }
 
     TickType_t delay_ticks = pdMS_TO_TICKS(delay_ms);
-    vTaskDelay(delay_ticks == 0 ? 1 : delay_ticks);
+    ulTaskNotifyTake(pdTRUE, delay_ticks == 0 ? 1 : delay_ticks);
   }
 }
 
@@ -269,18 +309,7 @@ static bool touch_read_and_process(uint16_t *cal_x, uint16_t *cal_y) {
 }
 
 static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
-  static int64_t last_read_time = 0;
   static uint16_t last_x = 0, last_y = 0;
-  static lv_indev_state_t last_state = LV_INDEV_STATE_RELEASED;
-
-  int64_t now = esp_timer_get_time();
-  if ((now - last_read_time) < 33000) { // Limit to ~30Hz (33ms)
-    data->point.x = last_x;
-    data->point.y = last_y;
-    data->state = last_state;
-    return;
-  }
-  last_read_time = now;
 
 #ifdef BSP_LCD_TOUCH_INT
   // ── Interrupt-driven mode ──────────────────────────────────────────
@@ -290,7 +319,6 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     data->point.x = last_x;
     data->point.y = last_y;
     data->state = LV_INDEV_STATE_RELEASED;
-    last_state = LV_INDEV_STATE_RELEASED;
     return;
   }
 
@@ -313,10 +341,8 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     data->state = LV_INDEV_STATE_PRESSED;
     last_x = cal_x;
     last_y = cal_y;
-    last_state = LV_INDEV_STATE_PRESSED;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
-    last_state = LV_INDEV_STATE_RELEASED;
   }
 }
 
@@ -467,13 +493,20 @@ esp_err_t display_init(void) {
   lv_display_set_flush_cb(disp, lvgl_flush_cb);
 
   // Register Touch Input Device
-  lv_indev_t *indev = lv_indev_create();
-  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-  lv_indev_set_read_cb(indev, lvgl_touch_read_cb);
+  s_touch_indev = lv_indev_create();
+  lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_read_cb(s_touch_indev, lvgl_touch_read_cb);
+  s_refresh_timer = lv_display_get_refr_timer(disp);
+  s_touch_read_timer = lv_indev_get_read_timer(s_touch_indev);
+  if (!s_refresh_timer || !s_touch_read_timer) return ESP_ERR_INVALID_STATE;
 
   // Create LVGL Task
   // Priority 5 (Normal), Core 1 (App Core)
-  xTaskCreatePinnedToCore(lvgl_task, "LVGL", 8192, NULL, 5, NULL, 1);
+  if (xTaskCreatePinnedToCore(lvgl_task, "LVGL", 8192, NULL, 5,
+                              &s_lvgl_task_handle, 1) != pdPASS) {
+    s_lvgl_task_handle = NULL;
+    return ESP_ERR_NO_MEM;
+  }
 
   return ret;
 }
@@ -498,5 +531,5 @@ void display_set_brightness(uint8_t percent) {
     percent = 100;
   s_selected_brightness = percent;
   uint32_t idle_ms = disp ? lv_display_get_inactive_time(disp) : 0;
-  apply_brightness(idle_ms >= DISPLAY_IDLE_DIM_MS);
+  set_display_idle(idle_ms >= DISPLAY_IDLE_DIM_MS, false);
 }

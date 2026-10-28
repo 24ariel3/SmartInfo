@@ -10,8 +10,9 @@ lv_obj_t * ui_PanelBackground = NULL;
 lv_obj_t * ui_PanelHeader = NULL;
 lv_obj_t * ui_LabelDate = NULL;
 lv_obj_t * ui_LabelTime = NULL;
-lv_obj_t * ui_ImageWifiDis = NULL;
 lv_obj_t * ui_ImageWifiConn = NULL;
+lv_obj_t * ui_ImageWifiDis = NULL;
+lv_obj_t * ui_LabelStatusbarBatteryLevel = NULL;
 lv_obj_t * ui_PanelIAQ = NULL;
 lv_obj_t * ui_Label9 = NULL;
 lv_obj_t * ui_SliderAQI = NULL;
@@ -503,7 +504,7 @@ void ui_Screen1_screen_init(void)
     ui_LabelDate = lv_label_create(ui_PanelHeader);
     lv_obj_set_width(ui_LabelDate, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_LabelDate, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_align(ui_LabelDate, LV_ALIGN_RIGHT_MID);
+    lv_obj_set_align(ui_LabelDate, LV_ALIGN_CENTER);
     lv_label_set_text(ui_LabelDate, "01/01/2026");
     lv_obj_set_style_text_color(ui_LabelDate, lv_color_hex(0xBBDED6), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_LabelDate, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -518,20 +519,32 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_style_text_opa(ui_LabelTime, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_LabelTime, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    ui_ImageWifiDis = lv_image_create(ui_PanelHeader);
-    lv_image_set_src(ui_ImageWifiDis, &ui_img_wifi_off_18dp_b_png);
-    lv_obj_set_width(ui_ImageWifiDis, LV_SIZE_CONTENT);   /// 1
-    lv_obj_set_height(ui_ImageWifiDis, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_align(ui_ImageWifiDis, LV_ALIGN_CENTER);
-    lv_obj_remove_flag(ui_ImageWifiDis, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-
     ui_ImageWifiConn = lv_image_create(ui_PanelHeader);
     lv_image_set_src(ui_ImageWifiConn, &ui_img_wifi_18dp_b_png);
     lv_obj_set_width(ui_ImageWifiConn, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_ImageWifiConn, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_align(ui_ImageWifiConn, LV_ALIGN_CENTER);
+    lv_obj_set_x(ui_ImageWifiConn, -38);
+    lv_obj_set_y(ui_ImageWifiConn, 0);
+    lv_obj_set_align(ui_ImageWifiConn, LV_ALIGN_RIGHT_MID);
     lv_obj_add_flag(ui_ImageWifiConn, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);     /// Flags
     lv_obj_remove_flag(ui_ImageWifiConn, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_ImageWifiDis = lv_image_create(ui_PanelHeader);
+    lv_image_set_src(ui_ImageWifiDis, &ui_img_wifi_off_18dp_b_png);
+    lv_obj_set_width(ui_ImageWifiDis, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_ImageWifiDis, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_x(ui_ImageWifiDis, -38);
+    lv_obj_set_y(ui_ImageWifiDis, 0);
+    lv_obj_set_align(ui_ImageWifiDis, LV_ALIGN_RIGHT_MID);
+    lv_obj_remove_flag(ui_ImageWifiDis, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+
+    ui_LabelStatusbarBatteryLevel = lv_label_create(ui_PanelHeader);
+    lv_obj_set_width(ui_LabelStatusbarBatteryLevel, LV_SIZE_CONTENT);   /// 1
+    lv_obj_set_height(ui_LabelStatusbarBatteryLevel, LV_SIZE_CONTENT);    /// 1
+    lv_obj_set_align(ui_LabelStatusbarBatteryLevel, LV_ALIGN_RIGHT_MID);
+    lv_label_set_text(ui_LabelStatusbarBatteryLevel, "--");
+    lv_obj_set_style_text_color(ui_LabelStatusbarBatteryLevel, lv_color_hex(0xBBDED6), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_LabelStatusbarBatteryLevel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_PanelIAQ = lv_obj_create(ui_Screen1);
     lv_obj_set_width(ui_PanelIAQ, 238);
@@ -3852,8 +3865,9 @@ void ui_Screen1_screen_destroy(void)
     ui_PanelHeader = NULL;
     ui_LabelDate = NULL;
     ui_LabelTime = NULL;
-    ui_ImageWifiDis = NULL;
     ui_ImageWifiConn = NULL;
+    ui_ImageWifiDis = NULL;
+    ui_LabelStatusbarBatteryLevel = NULL;
     ui_PanelIAQ = NULL;
     ui_Label9 = NULL;
     ui_SliderAQI = NULL;
