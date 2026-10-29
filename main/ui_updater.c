@@ -29,8 +29,6 @@ static const char *TAG = "UI_UPDATER";
 static weather_data_t s_weather_data = {0};
 
 // Cache variables to avoid redundant UI updates
-static char s_cached_time[32] = "";
-static char s_cached_date[32] = "";
 static bool s_cached_wifi_connected = false;
 static bool s_first_run = true;
 static int s_battery_mv;
@@ -44,6 +42,7 @@ static bool s_charger_connected;
 // Forward declaration
 static void check_wifi_scan_results(void);
 static void check_wifi_connection_status(void);
+static void set_label_text_if_changed(lv_obj_t *label, const char *text);
 
 // Weather UI element arrays (initialized once on first use)
 static lv_obj_t *s_weather_labels_day[5];
@@ -235,34 +234,27 @@ static void update_sensor_ui(const bsec_values_t *data) {
   char buf[64];
 
   snprintf(buf, sizeof(buf), "%.1f", data->comp_temperature);
-  if (ui_Label1)
-    lv_label_set_text(ui_Label1, buf);
+  set_label_text_if_changed(ui_Label1, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", data->comp_humidity);
-  if (ui_Label2)
-    lv_label_set_text(ui_Label2, buf);
+  set_label_text_if_changed(ui_Label2, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", data->breath_voc_equivalent);
-  if (ui_Label3)
-    lv_label_set_text(ui_Label3, buf);
+  set_label_text_if_changed(ui_Label3, buf);
 
   snprintf(buf, sizeof(buf), "%.0f", data->co2_equivalent);
-  if (ui_Label4)
-    lv_label_set_text(ui_Label4, buf);
+  set_label_text_if_changed(ui_Label4, buf);
 
   snprintf(buf, sizeof(buf), "%.0f", data->raw_pressure / 100.0f);
-  if (ui_Label5)
-    lv_label_set_text(ui_Label5, buf);
+  set_label_text_if_changed(ui_Label5, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", data->gas_percentage);
-  if (ui_Label6)
-    lv_label_set_text(ui_Label6, buf);
+  set_label_text_if_changed(ui_Label6, buf);
 
   snprintf(buf, sizeof(buf), "%.0f", data->iaq);
-  if (ui_LabelAQI)
-    lv_label_set_text(ui_LabelAQI, buf);
+  set_label_text_if_changed(ui_LabelAQI, buf);
   if (ui_SliderAQI)
-    lv_slider_set_value(ui_SliderAQI, (int32_t)data->iaq, LV_ANIM_ON);
+    lv_slider_set_value(ui_SliderAQI, (int32_t)data->iaq, LV_ANIM_OFF);
 
   // Update accuracy bars
   switch (data->iaq_accuracy) {
@@ -315,8 +307,12 @@ static void update_sensor_ui(const bsec_values_t *data) {
   } else {
     knob_color = lv_color_hex(0x663300);
   }
-  lv_obj_set_style_bg_color(ui_SliderAQI, knob_color,
-                            LV_PART_KNOB | LV_STATE_DEFAULT);
+  if (ui_SliderAQI &&
+      !lv_color_eq(lv_obj_get_style_bg_color(ui_SliderAQI, LV_PART_KNOB),
+                   knob_color)) {
+    lv_obj_set_style_bg_color(ui_SliderAQI, knob_color,
+                              LV_PART_KNOB | LV_STATE_DEFAULT);
+  }
   ESP_LOGD(TAG, "Sensor UI update took %lld us", esp_timer_get_time() - start);
 }
 
@@ -417,26 +413,42 @@ static void update_stock_ui(stock_values_t *data) {
   }
 }
 
-// Main UI update timer callback - runs every 1 second inside LVGL task
-// context
+static bool minute_display_due(time_t epoch_seconds, int64_t *last_minute) {
+  int64_t minute = (int64_t)epoch_seconds / 60;
+  if (minute == *last_minute) return false;
+  *last_minute = minute;
+  return true;
+}
+
+// Main UI update timer callback - runs every second inside the LVGL task.
 static void ui_update_timer_cb(lv_timer_t *timer) {
   (void)timer;
   int64_t start_all = esp_timer_get_time();
   int64_t t1, t2;
 
-  // 1. Update Sensor UI
-  int64_t current_sensor_ts = bsec_get_last_updated_time();
-  static int64_t last_sensor_ts = 0;
+  static int64_t last_display_minute = INT64_MIN;
+  static bool sensor_ui_initialized = false;
+  bool minute_due = minute_display_due(time(NULL), &last_display_minute);
 
-  if (current_sensor_ts != last_sensor_ts || s_first_run) {
+  if (minute_due) {
+    char time_buf[32];
+    char date_buf[32];
+    time_manager_get_time(time_buf, sizeof(time_buf), true);
+    time_manager_get_date(date_buf, sizeof(date_buf));
+    set_label_text_if_changed(ui_LabelTime, time_buf);
+    set_label_text_if_changed(ui_LabelDate, date_buf);
+  }
+
+  // Fill the first real sample promptly, then present snapshots on minute changes.
+  int64_t current_sensor_ts = bsec_get_last_updated_time();
+  if (current_sensor_ts > 0 && (minute_due || !sensor_ui_initialized)) {
     bsec_values_t sensor_data = {0};
-    bool sensor_updated = false;
     t1 = esp_timer_get_time();
-    if (bsec_get_latest_values(&sensor_data, &sensor_updated) == ESP_OK) {
+    if (bsec_get_latest_values(&sensor_data, NULL) == ESP_OK) {
       t2 = esp_timer_get_time();
       ESP_LOGD(TAG, "Sensor fetch took %lld us", t2 - t1);
       update_sensor_ui(&sensor_data);
-      last_sensor_ts = current_sensor_ts;
+      sensor_ui_initialized = true;
       ESP_LOGD(TAG, "Sensor UI updated (TS: %lld)", current_sensor_ts);
     }
   }
@@ -543,21 +555,6 @@ static void ui_update_timer_cb(lv_timer_t *timer) {
       last_weather_ts = current_weather_ts;
       ESP_LOGD(TAG, "Weather UI updated (TS: %lld)", current_weather_ts);
     }
-  }
-
-  // 4. Update Time and Date
-  char time_buf[32];
-  char date_buf[32];
-  time_manager_get_time(time_buf, sizeof(time_buf), true);
-  time_manager_get_date(date_buf, sizeof(date_buf));
-
-  if (s_first_run || strcmp(time_buf, s_cached_time) != 0) {
-    lv_label_set_text(ui_LabelTime, time_buf);
-    strncpy(s_cached_time, time_buf, sizeof(s_cached_time));
-  }
-  if (s_first_run || strcmp(date_buf, s_cached_date) != 0) {
-    lv_label_set_text(ui_LabelDate, date_buf);
-    strncpy(s_cached_date, date_buf, sizeof(s_cached_date));
   }
 
   // 5. Update WiFi status

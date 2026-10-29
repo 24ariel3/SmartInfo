@@ -20,7 +20,7 @@ bool time_manager_has_valid_time(void);
  * 
  * @param buf [out] Buffer to store the string.
  * @param buf_len [in] Size of the buffer.
- * @param is_24h [in] True for 24H format (HH:MM:SS), False for 12H (HH:MM:SS AM/PM).
+ * @param is_24h [in] True for 24H format (HH:MM), False for 12H (HH:MM AM/PM).
  */
 void time_manager_get_time(char *buf, size_t buf_len, bool is_24h);
 

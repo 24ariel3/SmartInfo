@@ -21,6 +21,10 @@
 #include "ui.h"
 #include "ui_updater.h"
 #include "weather.h"
+#include "sdkconfig.h"
+#if CONFIG_PM_ENABLE
+#include "esp_pm.h"
+#endif
 #include "wifi_connect.h"
 
 static const char *TAG = "MAIN";
@@ -157,6 +161,16 @@ void app_main(void) {
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "Device server unavailable: %s", esp_err_to_name(ret));
   }
+
+#if CONFIG_PM_ENABLE
+  const esp_pm_config_t pm_config = {
+      .max_freq_mhz = 80,
+      .min_freq_mhz = 10,
+      .light_sleep_enable = true,
+  };
+  ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+  ESP_LOGI(TAG, "Power management: CPU 10-80 MHz; light sleep after display idle");
+#endif
 
   // Keep Wi-Fi available through OTA boot verification and the first sync.
   esp_err_t startup_wifi_err = wifi_power_acquire(WIFI_POWER_STARTUP);

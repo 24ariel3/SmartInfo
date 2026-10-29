@@ -16,7 +16,7 @@ extern "C" {
 /**
  * @brief Initialize the UI updater
  *
- * Creates an lv_timer that runs every 1 second to update all UI elements.
+ * Services battery/network UI every second and clock/sensor labels each minute.
  * Must be called after ui_init() and while holding the display lock.
  */
 void ui_updater_init(void);

@@ -56,9 +56,9 @@ void time_manager_get_time(char *buf, size_t buf_len, bool is_24h) {
   localtime_r(&now, &timeinfo);
 
   if (is_24h) {
-    strftime(buf, buf_len, "%H:%M:%S", &timeinfo);
+    strftime(buf, buf_len, "%H:%M", &timeinfo);
   } else {
-    strftime(buf, buf_len, "%I:%M:%S %p", &timeinfo);
+    strftime(buf, buf_len, "%I:%M %p", &timeinfo);
   }
 }
 

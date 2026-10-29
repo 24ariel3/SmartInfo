@@ -15,6 +15,11 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "sdkconfig.h"
+#if CONFIG_PM_ENABLE
+#include "esp_pm.h"
+#include "esp_sleep.h"
+#endif
 #include <inttypes.h>
 #include <unistd.h>
 
@@ -34,6 +39,9 @@ static TaskHandle_t s_lvgl_task_handle = NULL;
 static uint8_t s_selected_brightness = DISPLAY_BACKLIGHT_DEFAULT;
 static int s_applied_brightness = -1;
 static bool s_display_idle = false;
+#if CONFIG_PM_ENABLE
+static esp_pm_lock_handle_t s_display_awake_lock;
+#endif
 #define DISPLAY_IDLE_DIM_MS 60000
 #define DISPLAY_IDLE_BRIGHTNESS_MAX 20
 #define DISPLAY_ACTIVE_PERIOD_MS 33
@@ -59,20 +67,14 @@ static SemaphoreHandle_t spi_bus_sem = NULL;
 // Touch interrupt mode (enabled when BSP_LCD_TOUCH_INT is defined in bsp.h)
 #ifdef BSP_LCD_TOUCH_INT
 static volatile bool touch_pending = false;
-static volatile int64_t last_touch_isr_time = 0;
-#define TOUCH_DEBOUNCE_US 10000 // 10ms debounce
-
-// Touch interrupt ISR - called when XPT2046 PENIRQ goes LOW (touch detected)
 static void IRAM_ATTR touch_isr_handler(void *arg) {
-  int64_t now = esp_timer_get_time();
-  if ((now - last_touch_isr_time) > TOUCH_DEBOUNCE_US) {
-    touch_pending = true;
-    last_touch_isr_time = now;
-    if (s_lvgl_task_handle) {
-      BaseType_t higher_priority_task_woken = pdFALSE;
-      vTaskNotifyGiveFromISR(s_lvgl_task_handle, &higher_priority_task_woken);
-      if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
-    }
+  // Mask the level IRQ until release; held touches are read by the LVGL timer.
+  gpio_intr_disable(BSP_LCD_TOUCH_INT);
+  touch_pending = true;
+  if (s_lvgl_task_handle) {
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_lvgl_task_handle, &higher_priority_task_woken);
+    if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
   }
 }
 #endif
@@ -152,7 +154,9 @@ static void set_display_idle(bool idle, bool wake_touch_timer) {
     return;
   }
 
-  s_display_idle = idle;
+#if CONFIG_PM_ENABLE
+  if (!idle) ESP_ERROR_CHECK(esp_pm_lock_acquire(s_display_awake_lock));
+#endif
   uint32_t period_ms = idle ? DISPLAY_IDLE_PERIOD_MS : DISPLAY_ACTIVE_PERIOD_MS;
   if (s_refresh_timer) lv_timer_set_period(s_refresh_timer, period_ms);
   if (s_touch_read_timer) lv_timer_set_period(s_touch_read_timer, period_ms);
@@ -160,6 +164,10 @@ static void set_display_idle(bool idle, bool wake_touch_timer) {
     lv_timer_ready(s_touch_read_timer);
 
   apply_brightness(idle);
+#if CONFIG_PM_ENABLE
+  if (idle) ESP_ERROR_CHECK(esp_pm_lock_release(s_display_awake_lock));
+#endif
+  s_display_idle = idle;
   ESP_LOGI(TAG, "Display %s: LVGL period=%" PRIu32 " ms", idle ? "idle" : "active",
            period_ms);
 }
@@ -286,9 +294,11 @@ static bool touch_read_and_process(uint16_t *cal_x, uint16_t *cal_y) {
   esp_err_t power_ret = touch_power_down();
 
 #ifdef BSP_LCD_TOUCH_INT
-  ESP_ERROR_CHECK(gpio_intr_enable(BSP_LCD_TOUCH_INT));
-  // A held press won't produce another falling edge after interrupts resume.
-  if (gpio_get_level(BSP_LCD_TOUCH_INT) == 0) touch_pending = true;
+  if (gpio_get_level(BSP_LCD_TOUCH_INT) == 0) {
+    touch_pending = true;
+  } else {
+    ESP_ERROR_CHECK(gpio_intr_enable(BSP_LCD_TOUCH_INT));
+  }
 #endif
 
   xSemaphoreGive(spi_bus_sem);
@@ -322,6 +332,11 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     return;
   }
 
+  // A press can arrive after the task's idle check, while LVGL is handling timers.
+  if (s_display_idle) {
+    lv_display_trigger_activity(disp);
+    set_display_idle(false, false);
+  }
   uint16_t cal_x, cal_y;
   bool touched = touch_read_and_process(&cal_x, &cal_y);
 
@@ -356,7 +371,7 @@ esp_err_t display_init(void) {
       .timer_num = LCD_BACKLIGHT_LEDC_TIMER,
       .duty_resolution = LCD_BACKLIGHT_LEDC_RES,
       .freq_hz = LCD_BACKLIGHT_LEDC_FREQ,
-      .clk_cfg = LEDC_AUTO_CLK,
+      .clk_cfg = LEDC_USE_RC_FAST_CLK,
   };
   ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
@@ -368,6 +383,7 @@ esp_err_t display_init(void) {
       .gpio_num = BSP_LCD_BACKLIGHT,
       .duty = 0, // Start off
       .hpoint = 0,
+      .sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE,
   };
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
   apply_brightness(false);
@@ -445,16 +461,14 @@ esp_err_t display_init(void) {
   ESP_ERROR_CHECK(touch_power_down());
 
 #ifdef BSP_LCD_TOUCH_INT
-  // Interrupt-driven touch: configure GPIO for PENIRQ with pull-up and
-  // falling edge trigger. The XPT2046 driver already configures the pin as
-  // input, but we add pull-up (open-drain output) and install our ISR.
+  // Install the handler before enabling the low-level interrupt used for wake.
   ESP_LOGI(TAG, "Configuring touch interrupt on GPIO %d", BSP_LCD_TOUCH_INT);
   gpio_config_t io_conf = {
       .pin_bit_mask = (1ULL << BSP_LCD_TOUCH_INT),
       .mode = GPIO_MODE_INPUT,
       .pull_up_en = GPIO_PULLUP_ENABLE,
       .pull_down_en = GPIO_PULLDOWN_DISABLE,
-      .intr_type = GPIO_INTR_NEGEDGE,
+      .intr_type = GPIO_INTR_DISABLE,
   };
   ESP_ERROR_CHECK(gpio_config(&io_conf));
 
@@ -464,6 +478,13 @@ esp_err_t display_init(void) {
   }
   ESP_ERROR_CHECK(
       gpio_isr_handler_add(BSP_LCD_TOUCH_INT, touch_isr_handler, NULL));
+  ESP_ERROR_CHECK(gpio_intr_disable(BSP_LCD_TOUCH_INT));
+  ESP_ERROR_CHECK(gpio_set_intr_type(BSP_LCD_TOUCH_INT, GPIO_INTR_LOW_LEVEL));
+#if CONFIG_PM_ENABLE
+  ESP_ERROR_CHECK(gpio_wakeup_enable(BSP_LCD_TOUCH_INT, GPIO_INTR_LOW_LEVEL));
+  ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
+#endif
+  ESP_ERROR_CHECK(gpio_intr_enable(BSP_LCD_TOUCH_INT));
   ESP_LOGI(TAG, "Touch interrupt enabled");
 #endif
 
@@ -500,11 +521,28 @@ esp_err_t display_init(void) {
   s_touch_read_timer = lv_indev_get_read_timer(s_touch_indev);
   if (!s_refresh_timer || !s_touch_read_timer) return ESP_ERR_INVALID_STATE;
 
+#if CONFIG_PM_ENABLE
+  ret = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "display_active",
+                           &s_display_awake_lock);
+  if (ret != ESP_OK) return ret;
+  ret = esp_pm_lock_acquire(s_display_awake_lock);
+  if (ret != ESP_OK) {
+    ESP_ERROR_CHECK(esp_pm_lock_delete(s_display_awake_lock));
+    s_display_awake_lock = NULL;
+    return ret;
+  }
+#endif
+
   // Create LVGL Task
   // Priority 5 (Normal), Core 1 (App Core)
   if (xTaskCreatePinnedToCore(lvgl_task, "LVGL", 8192, NULL, 5,
                               &s_lvgl_task_handle, 1) != pdPASS) {
     s_lvgl_task_handle = NULL;
+#if CONFIG_PM_ENABLE
+    ESP_ERROR_CHECK(esp_pm_lock_release(s_display_awake_lock));
+    ESP_ERROR_CHECK(esp_pm_lock_delete(s_display_awake_lock));
+    s_display_awake_lock = NULL;
+#endif
     return ESP_ERR_NO_MEM;
   }
 
