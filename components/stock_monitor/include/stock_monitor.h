@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <time.h>
 
 // Default stock symbols (used when NVS is empty)
 #define STOCK_DEFAULT_SYMBOL_1 "QCOM"
@@ -34,6 +35,9 @@ typedef struct {
  * @brief Initialize stock monitor (mutex, load symbols from NVS)
  */
 void stock_monitor_init(void);
+
+/** Weekdays 09:30 inclusive to 16:00 exclusive in New York; ignores holidays. */
+bool stock_monitor_is_market_open(time_t utc_epoch);
 
 /** Fetch both configured stock quotes. Call from the network sync task. */
 esp_err_t stock_monitor_refresh(void);

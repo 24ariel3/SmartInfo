@@ -29,7 +29,7 @@ bool time_manager_get_new_york_time(time_t utc_epoch, struct tm *out);
 void time_manager_get_time(char *buf, size_t buf_len, bool is_24h);
 
 /**
- * @brief Get the current date in DD/MM/YYYY format.
+ * @brief Get the current date in DD/MM/YY format.
  * 
  * @param buf [out] Buffer to store the string.
  * @param buf_len [in] Size of the buffer.

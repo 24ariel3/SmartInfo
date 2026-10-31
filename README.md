@@ -5,6 +5,18 @@
 
 The project demonstrates high-performance embedded GUI development using **LVGL 9.1.0**, **ESP-IDF v5.4.0**, and the **SquareLine Studio** UI designer.
 
+## UI Screenshots
+
+The touch interface combines weather, environmental sensing, stock quotes and device settings. Click a screenshot to view it at full size.
+
+| Dashboard | Expanded details | Network setup |
+| --- | --- | --- |
+| [<img src="EXTRA/Media/screen_1.jpg" alt="Main dashboard with forecast, environmental readings, stock quotes and status bar" width="220">](EXTRA/Media/screen_1.jpg) | [<img src="EXTRA/Media/screen_1_extendend.jpg" alt="Dashboard with expanded forecast and stock details" width="220">](EXTRA/Media/screen_1_extendend.jpg) | [<img src="EXTRA/Media/screen_2.jpg" alt="Network settings with Wi-Fi selection, password entry and on-screen keyboard" width="220">](EXTRA/Media/screen_2.jpg) |
+
+- **Dashboard:** The header shows time, date, Wi-Fi status and battery percentage. Below it are a five-day forecast, an air-quality indicator, temperature, humidity, pressure, gas-related readings and two stock quotes with their price changes. CO2-equivalent and VOC values are estimates provided by BSEC.
+- **Expanded details:** Additional panels show information for a selected forecast day and a selected stock, including previous close, daily high and daily low, while keeping the rest of the dashboard visible.
+- **Network setup:** Scan for available Wi-Fi networks, select a network and enter its password using the on-screen keyboard. The tab bar also provides access to stock selection, weather configuration and device settings.
+
 ## ✨ Key Features
 
 ### 1. 🖥️ Interactive Touch UI
@@ -54,7 +66,7 @@ The project follows a modular component-based architecture:
 - **`main/ui/`**: SquareLine Studio generated UI code (Screens, Widgets, Styles).
 - **`components/`**:
   - `bsec_bme680`: Handles BME680 sensor reading and BSEC algorithm processing.
-  - `stock_monitor`: HTTPS client for fetching financial data.
+  - `stock_monitor`: Fetches stock quotes and owns market-hours rules, using `time_manager` for New York time conversion.
   - `weather`: API client for weather data.
   - `wifi_connect`: Robust Wi-Fi state machine.
   - `device_server`: Authenticated local HTTP server for OTA uploads and device status.
@@ -228,13 +240,15 @@ The firmware samples charger presence once per second and requires two consecuti
 
 ### Battery Power Efficiency
 
-The display remains on. The clock uses `HH:MM`, and clock/date plus environmental sensor widgets refresh together at wall-clock minute changes. The first real sensor sample is displayed as soon as it is available; BME680/BSEC processing still runs approximately every three seconds. The existing one-second UI timer continues charger detection, battery runtime, and network-status work; battery voltage and percentage are sampled every ten seconds. Settings runtime counters retain `HH:MM:SS` and can redraw every second while visible.
+The display remains on. The clock uses `HH:MM` and the date uses `DD/MM/YY`; clock/date plus environmental sensor widgets refresh together at wall-clock minute changes. Current humidity is rounded to the nearest integer for display (half upward, without a math-library dependency); underlying sensor values remain unchanged. The first real sensor sample is displayed as soon as it is available; BME680/BSEC processing still runs approximately every three seconds. The existing one-second UI timer continues charger detection, battery runtime, and network-status work; battery voltage and percentage are sampled every ten seconds. Settings runtime counters retain `HH:MM:SS` and can redraw every second while visible.
 
 After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower), LVGL refresh, touch and animation periods change from 33 ms to 1000 ms, and the display releases its no-light-sleep lock. ESP-IDF uses frequency scaling from 10 to 80 MHz and tickless idle to sleep between work. Idle LVGL work is grouped into approximately one pass per second; GPIO27 interrupts that wait immediately. Touch on GPIO27 wakes the ESP32, restores the 33 ms periods and selected brightness, and blocks light sleep for the next active interval. Data updates do not reset the touch-idle timeout.
 
 Backlight PWM uses the sleep-compatible RC_FAST clock with LEDC keep-alive. GPIO27 uses low-level wake and an interrupt masked until touch release; held presses continue through the existing LVGL input timer. LVGL time comes directly from `esp_timer`, with no recurring 2 ms tick timer.
 
 Wi-Fi sync runs once immediately after boot, including stocks even when the market is closed. With valid time, automatic stock refreshes run Monday through Friday on five-minute boundaries from 09:30 through 16:00 New York time, including a final 16:00 request. New York EST/EDT is calculated directly from UTC using US DST rules, independently of the Israel display timezone. Holidays and early closes are intentionally ignored. Weather and NTP run on hourly `:00` boundaries and share the stock window when due together; outside market hours the automatic windows are hourly. If time is unavailable, NTP recovery windows remain five minutes apart and HTTPS waits for valid time. Explicit manual requests run immediately, including stock refreshes outside market hours. Failed stock work waits for an eligible market window or another manual request; weather/NTP failures join existing windows without adding radio wakeups. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap.
+
+Ticker-symbol labels on the dashboard and expanded panels use `2ECC71` while the market is open and `BBDED6` while closed or the clock is not yet valid. Market-open status is Monday through Friday, 09:30 inclusive to 16:00 exclusive in New York, ignoring holidays and early closes. Colors are checked at initialization and minute changes, independently of Wi-Fi and quote updates. At 16:00 the ticker colors show closed while the final scheduled quote is still fetched. Current-price, percentage-change and direction-indicator styling is unchanged.
 
 Both Finnhub quotes are fetched consecutively without the old two-second pause. They share one certificate-verified HTTPS client, reusing its connection when the server permits persistence; a failed reused transport gets one fresh-connection retry. HTTP errors such as 429 are not immediately retried. The client is always destroyed before weather starts, releasing its TLS memory. BME680/BSEC remains in LP mode with approximately three-second sampling.
 
@@ -244,7 +258,7 @@ ESP-IDF 5.4 builds currently rely on the local PWM/light-sleep SDK fix: `s_sleep
 
 Reported battery runtime using two Panasonic NCR18650B cells in parallel improved from approximately 19 hours initially to approximately 28 hours. The latest confirmed 28-hour result belongs to the previously flashed firmware, including minute-aligned dashboard updates and automatic light sleep; use it as the baseline for the market-aware Wi-Fi and lower-idle-activity changes. These reports do not isolate the savings from individual features.
 
-The market-aware build was installed successfully over OTA on 2026-10-30 at `192.168.0.53`, slot `ota_1`, build identifier `e8e10892cb32`. The uploader verified the complete build hash and startup confirmation. Host checks passed for DST/scheduling, idle timing, HTTP batching and quote handling. Battery runtime and prolonged-idle touch behavior for this build remain unmeasured; startup confirmation does not validate them. The subsequent UI export dated 2026-10-31 is pending a clean rebuild and device validation; it is not part of that confirmed OTA image.
+The market-aware build was installed successfully over OTA on 2026-10-30 at `192.168.0.53`, slot `ota_1`, build identifier `e8e10892cb32`. The uploader verified the complete build hash and startup confirmation. Host checks passed for DST/scheduling, idle timing, HTTP batching and quote handling. Battery runtime and prolonged-idle touch behavior for this build remain unmeasured; startup confirmation does not validate them. The subsequent UI export dated 2026-10-31 is included in a clean build with the shorter date, rounded humidity and ticker market-status colors. This newer image has not been flashed; the 2026-10-30 OTA remains the last confirmed device image.
 
 A Phase 1 image without PM is saved locally at `build/power-save-phase1/SmartInfo7.bin`. If needed, restore it with `ota_update.bat DEVICE_IP build\power-save-phase1\SmartInfo7.bin`, or use USB recovery if the device is unreachable. Disabling `CONFIG_PM_ENABLE` also allows a recovery build; keep `CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y` for the level-triggered touch ISR.
 

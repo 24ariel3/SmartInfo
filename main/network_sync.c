@@ -26,12 +26,10 @@ static int64_t s_last_hour_queued = -1;
 static time_t s_next_slot_epoch;
 
 static bool is_stock_slot(time_t slot_epoch) {
-  struct tm ny;
-  if (!time_manager_get_new_york_time(slot_epoch, &ny)) return false;
-  int minute = ny.tm_hour * 60 + ny.tm_min;
-  // shortcut: holidays and early closes are ignored; add a calendar if required.
-  return ny.tm_wday >= 1 && ny.tm_wday <= 5 && ny.tm_sec == 0 &&
-         ny.tm_min % 5 == 0 && minute >= 9 * 60 + 30 && minute <= 16 * 60;
+  // Include the final close quote while the UI already shows the market closed.
+  return slot_epoch % NETWORK_SLOT_SECONDS == 0 &&
+         (stock_monitor_is_market_open(slot_epoch) ||
+          stock_monitor_is_market_open(slot_epoch - 1));
 }
 
 static time_t next_slot_epoch(time_t epoch) {

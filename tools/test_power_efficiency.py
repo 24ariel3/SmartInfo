@@ -95,6 +95,7 @@ def epoch(value):
 
 def schedule_tests():
     ny = function(source('components/time_manager/time_manager.c'), 'time_manager_get_new_york_time')
+    ny += function(source('components/stock_monitor/src/stock_monitor.c'), 'stock_monitor_is_market_open')
     net = re.sub(r'^#include.*\n', '', source('main/network_sync.c'), flags=re.M)
     mock = r'''
 #define NETWORK_SYNC_STOCKS 1U
@@ -140,6 +141,9 @@ static int xTaskCreatePinnedToCore(void (*fn)(void *),const char *name,int stack
             cases.append(f'assert(time_manager_get_new_york_time({epoch(utc)}LL,&ny)); assert(ny.tm_hour=={hour} && ny.tm_min=={minute} && ny.tm_sec=={second} && ny.tm_isdst=={dst});')
     for utc, expected in [('2026-01-12T14:30:00',1),('2026-07-13T13:30:00',1),('2026-03-16T13:30:00',1),('2026-10-26T13:30:00',1),('2026-01-12T14:25:00',0),('2026-01-12T21:00:00',1),('2026-01-12T21:05:00',0),('2026-01-17T14:30:00',0),('2026-01-18T14:30:00',0),('2026-07-03T13:30:00',1)]:
         cases.append(f'assert(is_stock_slot({epoch(utc)}LL)=={expected});')
+    for utc, expected in [('2026-01-12T14:29:59',0),('2026-01-12T14:30:00',1),('2026-01-12T14:31:00',1),('2026-01-12T20:59:59',1),('2026-01-12T21:00:00',0),('2026-01-12T21:00:01',0),('2026-07-13T13:30:00',1),('2026-03-16T13:30:00',1),('2026-10-26T13:30:00',1),('2026-01-17T14:30:00',0),('2026-01-18T14:30:00',0),('2026-07-03T13:30:00',1)]:
+        cases.append(f'assert(stock_monitor_is_market_open({epoch(utc)}LL)=={expected});')
+    cases.append('assert(!stock_monitor_is_market_open(0));')
     for now, nxt in [('2026-01-12T14:01:00','2026-01-12T14:30:00'),('2026-01-12T14:31:00','2026-01-12T14:35:00'),('2026-01-12T20:56:00','2026-01-12T21:00:00'),('2026-01-12T21:01:00','2026-01-12T22:00:00'),('2026-01-17T14:31:00','2026-01-17T15:00:00')]:
         cases.append(f'assert(next_slot_epoch({epoch(now)}LL)=={epoch(nxt)}LL);')
     scenarios = r'''
@@ -326,8 +330,89 @@ int main(void) {
 '''
     run('stock','#include "cJSON.h"\n'+types+'\n'+definitions+'\n'+mock+functions+main,['-I'+str(cjson),cjson/'cJSON.c'])
 
+
+def dashboard_tests():
+    ui = source('main/ui_updater.c')
+    sensor = function(ui, 'update_sensor_ui')
+    color = function(ui, 'update_stock_market_ui')
+    labels = sorted(set(re.findall(r'\bui_\w+', sensor + color)) |
+                    {'ui_LabelStock1Price', 'ui_LabelStock1Change'})
+    declarations = '\n'.join(f'static lv_obj_t object_{label};\nstatic lv_obj_t *{label}=&object_{label};' for label in labels)
+    fields = sorted(set(re.findall(r'data->(\w+)', sensor)))
+    sensor_type = 'typedef struct {' + ''.join(('int' if f == 'iaq_accuracy' else 'float') + ' ' + f + ';' for f in fields) + '} bsec_values_t;\n'
+    mock = r"""
+#define LV_PART_MAIN 1
+#define LV_STATE_DEFAULT 0
+#define LV_PART_KNOB 2
+#define LV_ANIM_OFF 0
+#define LV_OBJ_FLAG_HIDDEN 1
+typedef uint32_t lv_color_t;
+typedef struct {lv_color_t color,bg;char text[64];} lv_obj_t;
+static int style_writes;
+static bool valid_clock=true;
+static time_t wall;
+static int64_t esp_timer_get_time(void) {return 0;}
+static bool time_manager_has_valid_time(void) {return valid_clock;}
+static lv_color_t lv_color_hex(uint32_t rgb) {return rgb;}
+static bool lv_color_eq(lv_color_t a,lv_color_t b) {return a==b;}
+static lv_color_t lv_obj_get_style_text_color(lv_obj_t *label,int part) {assert(label && part==LV_PART_MAIN);return label->color;}
+static void lv_obj_set_style_text_color(lv_obj_t *label,lv_color_t c,int part) {assert(label && part==(LV_PART_MAIN|LV_STATE_DEFAULT));style_writes++;label->color=c;}
+static const char *lv_label_get_text(lv_obj_t *label) {return label->text;}
+static void lv_label_set_text(lv_obj_t *label,const char *text) {snprintf(label->text,sizeof(label->text),"%s",text);}
+static lv_color_t lv_obj_get_style_bg_color(lv_obj_t *label,int part) {return label->bg;}
+static void lv_obj_set_style_bg_color(lv_obj_t *label,lv_color_t color,int part) {label->bg=color;}
+static void lv_slider_set_value(lv_obj_t *label,int value,int anim) {}
+static void lv_obj_add_flag(lv_obj_t *label,int flag) {}
+static void lv_obj_clear_flag(lv_obj_t *label,int flag) {}
+static void lv_obj_set_x(lv_obj_t *label,int x) {}
+static time_t fake_time(time_t *out) {if(out)*out=wall;return wall;}
+// Supply a fixed local calendar for date-format tests, independent of host TZ.
+#define time fake_time
+#define localtime_r gmtime_r
+"""
+    helpers = function(source('components/time_manager/time_manager.c'), 'time_manager_get_new_york_time')
+    helpers += function(source('components/stock_monitor/src/stock_monitor.c'), 'stock_monitor_is_market_open')
+    helpers += function(source('components/time_manager/time_manager.c'), 'time_manager_get_date')
+    helpers += function(ui, 'set_label_text_if_changed') + sensor + color
+    main = r"""
+static void check_colors(uint32_t expected) {
+ assert(ui_LabelStock1Symbol->color==expected && ui_LabelStock2Symbol->color==expected);
+ assert(ui_LabelStock1SymbolEx->color==expected && ui_LabelStock2SymbolEx->color==expected);
+ assert(ui_LabelStock1Price->color==0x123456 && ui_LabelStock1Change->color==0xFF0000);
+}
+int main(void) {
+ char date[32];
+"""
+    for day, expected in [('2026-10-31T12:00:00','31/10/26'), ('2027-01-01T00:00:00','01/01/27'), ('2028-02-29T00:00:00','29/02/28')]:
+        main += f'wall={epoch(day)}LL;time_manager_get_date(date,sizeof(date));assert(strcmp(date,"{expected}")==0);\n'
+    main += r"""
+ bsec_values_t data={0};
+"""
+    for humidity, expected in [(0,0),(48.4,48),(48.5,49),(48.9,49),(100,100)]:
+        main += f'data.comp_humidity={humidity:.1f}f;update_sensor_ui(&data);assert(strcmp(ui_Label2->text,"{expected}")==0 && data.comp_humidity=={humidity:.1f}f);\n'
+    main += r"""
+ ui_LabelStock1Price->color=0x123456;ui_LabelStock1Change->color=0xFF0000;
+ valid_clock=false;update_stock_market_ui(1768228200);check_colors(0xBBDED6);assert(style_writes==4);
+ valid_clock=true;update_stock_market_ui(1768228200);check_colors(0x2ECC71);assert(style_writes==8);
+ // Stay green between five-minute quote slots, with no quote/network input.
+ update_stock_market_ui(1768228260);check_colors(0x2ECC71);assert(style_writes==8);
+ update_stock_market_ui(1768251599);check_colors(0x2ECC71);assert(style_writes==8);
+ update_stock_market_ui(1768251600);check_colors(0xBBDED6);assert(style_writes==12);
+ ui_LabelStock2SymbolEx=NULL;update_stock_market_ui(1768228200);assert(style_writes==15);
+ ui_LabelStock1Symbol=ui_LabelStock2Symbol=ui_LabelStock1SymbolEx=NULL;
+ update_stock_market_ui(1768251600);assert(style_writes==15);
+ puts("PASS: short dates, integer humidity, ticker colors, unchanged/null labels");
+}
+"""
+    # Guard integration: market styling must not wait for a quote-cache update.
+    callback = function(ui, 'ui_update_timer_cb')
+    assert callback.index('update_stock_market_ui(now_epoch)') < callback.index('stock_get_last_updated_time()')
+    assert 'update_stock_market_ui(time(NULL))' in function(ui, 'ui_updater_init')
+    run('dashboard', mock + declarations + sensor_type + helpers + main)
+
 if __name__ == '__main__':
     schedule_tests()
     display_tests()
     http_tests()
     stock_tests()
+    dashboard_tests()

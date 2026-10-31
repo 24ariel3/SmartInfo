@@ -91,5 +91,5 @@ void time_manager_get_date(char *buf, size_t buf_len) {
   struct tm timeinfo;
   time(&now);
   localtime_r(&now, &timeinfo);
-  strftime(buf, buf_len, "%d/%m/%Y", &timeinfo);
+  strftime(buf, buf_len, "%d/%m/%y", &timeinfo);
 }

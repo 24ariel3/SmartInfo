@@ -236,7 +236,7 @@ static void update_sensor_ui(const bsec_values_t *data) {
   snprintf(buf, sizeof(buf), "%.1f", data->comp_temperature);
   set_label_text_if_changed(ui_Label1, buf);
 
-  snprintf(buf, sizeof(buf), "%.1f", data->comp_humidity);
+  snprintf(buf, sizeof(buf), "%d", (int)(data->comp_humidity + 0.5f));
   set_label_text_if_changed(ui_Label2, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", data->breath_voc_equivalent);
@@ -413,6 +413,18 @@ static void update_stock_ui(stock_values_t *data) {
   }
 }
 
+static void update_stock_market_ui(time_t utc_epoch) {
+  bool open = time_manager_has_valid_time() && stock_monitor_is_market_open(utc_epoch);
+  lv_color_t color = lv_color_hex(open ? 0x2ECC71 : 0xBBDED6);
+  lv_obj_t *labels[] = {ui_LabelStock1Symbol, ui_LabelStock2Symbol,
+                        ui_LabelStock1SymbolEx, ui_LabelStock2SymbolEx};
+  for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+    if (labels[i] && !lv_color_eq(lv_obj_get_style_text_color(labels[i], LV_PART_MAIN), color)) {
+      lv_obj_set_style_text_color(labels[i], color, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+  }
+}
+
 static bool minute_display_due(time_t epoch_seconds, int64_t *last_minute) {
   int64_t minute = (int64_t)epoch_seconds / 60;
   if (minute == *last_minute) return false;
@@ -428,7 +440,8 @@ static void ui_update_timer_cb(lv_timer_t *timer) {
 
   static int64_t last_display_minute = INT64_MIN;
   static bool sensor_ui_initialized = false;
-  bool minute_due = minute_display_due(time(NULL), &last_display_minute);
+  time_t now_epoch = time(NULL);
+  bool minute_due = minute_display_due(now_epoch, &last_display_minute);
 
   if (minute_due) {
     char time_buf[32];
@@ -437,6 +450,7 @@ static void ui_update_timer_cb(lv_timer_t *timer) {
     time_manager_get_date(date_buf, sizeof(date_buf));
     set_label_text_if_changed(ui_LabelTime, time_buf);
     set_label_text_if_changed(ui_LabelDate, date_buf);
+    update_stock_market_ui(now_epoch);
   }
 
   // Fill the first real sample promptly, then present snapshots on minute changes.
@@ -1207,6 +1221,8 @@ void ui_updater_init(void) {
       lv_label_set_text(ui_LabelStock2SymbolEx, sym2);
     ESP_LOGI(TAG, "Set stock 2 label to: %s", sym2);
   }
+
+  update_stock_market_ui(time(NULL));
 
   // Initialize weather UI element arrays
   init_weather_ui_arrays();

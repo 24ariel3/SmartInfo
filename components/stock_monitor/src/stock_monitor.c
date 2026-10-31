@@ -1,4 +1,5 @@
 #include "stock_monitor.h"
+#include "time_manager.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_timer.h" // For getting timestamp
@@ -32,6 +33,15 @@ static char s_stock_symbol_2[16] = STOCK_DEFAULT_SYMBOL_2;
 // Thread-safe state storage
 static stock_values_t stock_cache = {0};
 static SemaphoreHandle_t stock_mutex = NULL;
+
+bool stock_monitor_is_market_open(time_t utc_epoch) {
+  struct tm ny;
+  if (!time_manager_get_new_york_time(utc_epoch, &ny)) return false;
+  int minute = ny.tm_hour * 60 + ny.tm_min;
+  // shortcut: holidays and early closes are ignored; add a calendar if required.
+  return ny.tm_wday >= 1 && ny.tm_wday <= 5 &&
+         minute >= 9 * 60 + 30 && minute < 16 * 60;
+}
 
 // Helper to safely get double (or int) from JSON
 static double get_json_double(cJSON *json, const char *key) {
