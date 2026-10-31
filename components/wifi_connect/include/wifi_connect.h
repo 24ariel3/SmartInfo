@@ -72,6 +72,13 @@ bool wifi_is_connected(void);
  */
 esp_err_t wifi_perform_http_get(const char *url, char **out_buffer);
 
+/** Sequential GETs sharing a client; returns the first error, or ESP_OK.
+ * Each result is independent. Caller frees every non-NULL response buffer.
+ * No connection survives the batch, including when a request fails.
+ */
+esp_err_t wifi_perform_http_get_batch(const char *const *urls, char **out_buffers,
+                                     esp_err_t *out_results, size_t count);
+
 /**
  * @brief Scan for available Wi-Fi networks
  *

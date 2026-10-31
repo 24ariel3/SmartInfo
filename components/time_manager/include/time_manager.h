@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 #include "esp_err.h"
 
 /**
@@ -14,6 +15,9 @@ void time_manager_init(void);
 /** Synchronize time with NTP, returning after success or timeout. */
 esp_err_t time_manager_sync(uint32_t timeout_ms);
 bool time_manager_has_valid_time(void);
+
+/** Convert UTC to New York time without changing the Israel display timezone. */
+bool time_manager_get_new_york_time(time_t utc_epoch, struct tm *out);
 
 /**
  * @brief Get the current time in formatted string.

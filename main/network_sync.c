@@ -23,20 +23,36 @@ static bool s_startup_sync_pending = true;
 static bool s_retry_time;
 static int64_t s_next_slot_us;
 static int64_t s_last_hour_queued = -1;
+static time_t s_next_slot_epoch;
 
-static int64_t next_slot_epoch(int64_t epoch_seconds) {
-  return (epoch_seconds / NETWORK_SLOT_SECONDS + 1) * NETWORK_SLOT_SECONDS;
+static bool is_stock_slot(time_t slot_epoch) {
+  struct tm ny;
+  if (!time_manager_get_new_york_time(slot_epoch, &ny)) return false;
+  int minute = ny.tm_hour * 60 + ny.tm_min;
+  // shortcut: holidays and early closes are ignored; add a calendar if required.
+  return ny.tm_wday >= 1 && ny.tm_wday <= 5 && ny.tm_sec == 0 &&
+         ny.tm_min % 5 == 0 && minute >= 9 * 60 + 30 && minute <= 16 * 60;
 }
 
-static int64_t next_periodic_slot_us(int64_t now_us) {
-  if (time_manager_has_valid_time()) {
-    time_t epoch;
-    time(&epoch);
-    int64_t seconds_until_slot = next_slot_epoch(epoch) - epoch;
-    return now_us + seconds_until_slot * 1000000LL;
+static time_t next_slot_epoch(time_t epoch) {
+  time_t next_hour = (epoch / 3600 + 1) * 3600;
+  for (time_t slot = (epoch / NETWORK_SLOT_SECONDS + 1) * NETWORK_SLOT_SECONDS;
+       slot < next_hour; slot += NETWORK_SLOT_SECONDS) {
+    if (is_stock_slot(slot)) return slot;
   }
+  return next_hour;
+}
 
-  return now_us + NETWORK_SLOT_US;
+static void schedule_next_slot(int64_t now_us) {
+  s_next_slot_epoch = 0;
+  s_next_slot_us = now_us + NETWORK_SLOT_US;
+  if (time_manager_has_valid_time()) {
+    time_t epoch = time(NULL);
+    s_next_slot_epoch = next_slot_epoch(epoch);
+    s_next_slot_us = now_us + (int64_t)(s_next_slot_epoch - epoch) * 1000000LL;
+  }
+  ESP_LOGI(TAG, "Next scheduled Wi-Fi window in %" PRId64 " seconds",
+           (s_next_slot_us - now_us) / 1000000);
 }
 
 static TickType_t wait_until_next_slot(int64_t now_us) {
@@ -44,6 +60,24 @@ static TickType_t wait_until_next_slot(int64_t now_us) {
   uint64_t wait_ms = (uint64_t)(s_next_slot_us - now_us) / 1000;
   TickType_t ticks = pdMS_TO_TICKS(wait_ms);
   return ticks == 0 ? 1 : ticks;
+}
+
+static void merge_hourly_work(time_t epoch, uint32_t *work, bool *time_due) {
+  int64_t hour = (int64_t)epoch / 3600;
+  if (hour != s_last_hour_queued) {
+    *work |= NETWORK_SYNC_WEATHER;
+    *time_due = true;
+    s_last_hour_queued = hour;
+  }
+}
+
+static bool stock_due_in_window(time_t epoch, bool periodic_due) {
+  if (!periodic_due) return false;
+  // Use the target slot for normal delays, and the latest slot after clock jumps.
+  time_t slot = s_next_slot_epoch;
+  if (slot == 0 || epoch < slot || epoch - slot >= NETWORK_SLOT_SECONDS)
+    slot = epoch / NETWORK_SLOT_SECONDS * NETWORK_SLOT_SECONDS;
+  return is_stock_slot(slot);
 }
 
 void network_sync_request(uint32_t work) {
@@ -68,118 +102,88 @@ static void network_sync_task(void *arg) {
   while (1) {
     int64_t now_us = esp_timer_get_time();
     bool startup_due = s_startup_sync_pending;
-    bool periodic_due = startup_due || s_next_slot_us == 0 ||
-                        now_us >= s_next_slot_us;
+    bool periodic_due = s_next_slot_us == 0 || now_us >= s_next_slot_us;
     uint32_t work = take_requests();
-    bool has_request = work != 0;
+    bool manual_stock = (work & NETWORK_SYNC_STOCKS) != 0;
 
-    if (!startup_due && !periodic_due && !has_request) {
+    if (!startup_due && !periodic_due && work == 0) {
       uint32_t ignored;
       xTaskNotifyWait(0, UINT32_MAX, &ignored, wait_until_next_slot(now_us));
       continue;
     }
 
+    bool time_due = startup_due || s_retry_time || !time_manager_has_valid_time();
+    s_retry_time = false;
     if (startup_due) {
       s_startup_sync_pending = false;
       work |= NETWORK_SYNC_STOCKS | NETWORK_SYNC_WEATHER;
-    } else if (periodic_due) {
-      work |= NETWORK_SYNC_STOCKS;
     }
-    work |= s_retry_work;
-    s_retry_work = 0;
 
-    bool time_due = startup_due || s_retry_time;
-    s_retry_time = false;
-
-    bool time_valid_before_sync = time_manager_has_valid_time();
-    if (periodic_due && time_valid_before_sync) {
-      time_t epoch;
-      time(&epoch);
-      int64_t current_hour = (int64_t)epoch / 3600;
-      if (startup_due) {
-        s_last_hour_queued = current_hour;
-      } else if (current_hour > s_last_hour_queued) {
-        work |= NETWORK_SYNC_WEATHER;
-        time_due = true;
-        s_last_hour_queued = current_hour;
-      }
-    }
-    if (!time_valid_before_sync && work != 0) time_due = true;
-
-    ESP_LOGI(TAG, "%s sync window: work=0x%" PRIx32 ", time=%s",
-             startup_due ? "Startup" : periodic_due ? "Periodic" : "Requested",
-             work, time_due ? "yes" : "no");
-
+    int64_t window_start = now_us;
     esp_err_t hold_err = wifi_power_acquire(WIFI_POWER_SYNC);
     bool connected = hold_err == ESP_OK && wifi_wait_connected(30000);
     bool time_attempted = false;
     esp_err_t time_err = hold_err;
-    if (connected && (time_due || !time_manager_has_valid_time())) {
-      time_attempted = true;
-      time_err = time_manager_sync(10000);
+    // A boundary reached while connecting or synchronizing joins this session.
+    for (int pass = 0; pass < 2; ++pass) {
+      now_us = esp_timer_get_time();
+      if (s_next_slot_us == 0 || now_us >= s_next_slot_us) periodic_due = true;
+      if (time_manager_has_valid_time())
+        merge_hourly_work(time(NULL), &work, &time_due);
+      if (connected && time_due && !time_attempted) {
+        time_attempted = true;
+        time_err = time_manager_sync(10000);
+      }
     }
 
     bool time_valid = time_manager_has_valid_time();
-    if (time_valid) {
-      time_t epoch;
-      time(&epoch);
-      int64_t current_hour = (int64_t)epoch / 3600;
-      if (s_last_hour_queued < 0) {
-        s_last_hour_queued = current_hour;
-      } else if (current_hour > s_last_hour_queued) {
-        // SNTP can move the clock across an hour; fetch weather in this window.
-        work |= NETWORK_SYNC_WEATHER;
-        s_last_hour_queued = current_hour;
-      }
-    }
+    bool stock_allowed = startup_due || manual_stock ||
+                         (time_valid && stock_due_in_window(time(NULL), periodic_due));
+    if (stock_allowed) work |= NETWORK_SYNC_STOCKS;
+    uint32_t retry_mask = NETWORK_SYNC_WEATHER |
+                          (stock_allowed ? NETWORK_SYNC_STOCKS : 0);
+    work |= s_retry_work & retry_mask;
+    s_retry_work &= ~work;
 
-    if (!connected) {
-      ESP_LOGW(TAG, "Wi-Fi unavailable; deferring work to the next window");
+    // Rebase after NTP before HTTP so a manual fetch cannot skip a later boundary.
+    if (time_attempted && time_valid && !periodic_due && !startup_due)
+      schedule_next_slot(esp_timer_get_time());
+
+    ESP_LOGI(TAG, "%s sync window: work=0x%" PRIx32 ", time=%s",
+             startup_due ? "Startup" : periodic_due ? "Periodic" : "Requested",
+             work, time_due ? "yes" : "no");
+    if (!connected || !time_valid) {
+      ESP_LOGW(TAG, "Wi-Fi or clock unavailable; deferring HTTPS work");
       s_retry_work |= work;
-      if (time_due || !time_valid) s_retry_time = true;
-    } else if (!time_valid) {
-      ESP_LOGW(TAG, "Clock unavailable; deferring HTTPS work to the next window");
-      s_retry_work |= work;
-      s_retry_time = true;
     } else {
-      if (work & NETWORK_SYNC_STOCKS) {
-        if (stock_monitor_refresh() != ESP_OK) {
-          ESP_LOGW(TAG, "Stock refresh failed; retrying in a scheduled window");
-          s_retry_work |= NETWORK_SYNC_STOCKS;
-        }
+      if ((work & NETWORK_SYNC_STOCKS) && stock_monitor_refresh() != ESP_OK) {
+        ESP_LOGW(TAG, "Stock refresh failed; retrying in a market window");
+        s_retry_work |= NETWORK_SYNC_STOCKS;
       }
-      if (work & NETWORK_SYNC_WEATHER) {
-        if (weather_refresh() != ESP_OK) {
-          ESP_LOGW(TAG, "Weather refresh failed; retrying in a scheduled window");
-          s_retry_work |= NETWORK_SYNC_WEATHER;
-        }
+      if ((work & NETWORK_SYNC_WEATHER) && weather_refresh() != ESP_OK) {
+        ESP_LOGW(TAG, "Weather refresh failed; retrying in a scheduled window");
+        s_retry_work |= NETWORK_SYNC_WEATHER;
       }
     }
 
-    if (time_due && (!connected || !time_attempted || time_err != ESP_OK ||
-                     !time_valid)) {
+    if (time_due && (!connected || !time_attempted || time_err != ESP_OK || !time_valid))
       s_retry_time = true;
-      if (connected && time_attempted)
-        ESP_LOGW(TAG, "Time sync failed; retrying in a scheduled window");
-    }
-
     if (hold_err == ESP_OK) wifi_power_release(WIFI_POWER_SYNC);
 
     now_us = esp_timer_get_time();
-    if (periodic_due || (!time_valid_before_sync && time_valid)) {
-      s_next_slot_us = next_periodic_slot_us(now_us);
-      ESP_LOGI(TAG, "Next scheduled Wi-Fi window in %" PRId64 " seconds",
-               (s_next_slot_us - now_us) / 1000000);
-    }
+    if (periodic_due || startup_due) schedule_next_slot(now_us);
+    ESP_LOGD(TAG, "Wi-Fi window took %" PRId64 " ms", (now_us - window_start) / 1000);
   }
 }
 
 esp_err_t network_sync_start(void) {
   if (s_task) return ESP_ERR_INVALID_STATE;
 
-  configASSERT(next_slot_epoch(10 * 3600 + 3 * 60 + 20) == 10 * 3600 + 5 * 60);
-  configASSERT(next_slot_epoch(10 * 3600 + 5 * 60) == 10 * 3600 + 10 * 60);
-  configASSERT(next_slot_epoch(23 * 3600 + 59 * 60 + 59) == 24 * 3600);
+  // Monday 2026-01-12: opening at 14:30 UTC, final quote at 21:00 UTC.
+  configASSERT(is_stock_slot(1768228200));
+  configASSERT(is_stock_slot(1768251600));
+  configASSERT(!is_stock_slot(1768251900));
+  configASSERT(next_slot_epoch(1768226460) == 1768228200);
 
   BaseType_t result = xTaskCreatePinnedToCore(
       network_sync_task, "network_sync", 8192, NULL, 1, &s_task, 0);

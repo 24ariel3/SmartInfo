@@ -26,7 +26,7 @@ The project demonstrates high-performance embedded GUI development using **LVGL 
 - **Live Data:** Fetches realtime price, percent change, day high/low, and previous close.
 - **Visual Cues:** Color-coded (Green/Red) indicators for positive/negative trends.
 - **Customizable:** User can input any ticker symbol via the on-screen keyboard.
-- **Thread-safe:** Dedicated background task for API fetching prevents UI freezes.
+- **Thread-safe:** Stocks, weather and NTP share one background network-sync task; sequential requests avoid overlapping TLS allocations and keep network calls out of the UI task.
 
 ### 4. 🌦️ Weather Station
 - **5-Day Forecast:** Detailed daily forecast with high/low temps, precipitation, UV index, and wind.
@@ -50,14 +50,34 @@ The project follows a modular component-based architecture:
 
 - **`main.c`**: Application entry point, hardware initialization, and task creation.
 - **`ui_updater.c`**: The "Glue" Logic. Bridges the low-level hardware tasks with the High-Level UI. It listens for data changes and updates LVGL widgets safely within the UI mutex.
-- **`ui/`**: SquareLine Studio generated UI code (Screens, Widgets, Styles).
+- **`main/network_sync.c`**: Coordinates scheduled and manual network work and Wi-Fi ownership.
+- **`main/ui/`**: SquareLine Studio generated UI code (Screens, Widgets, Styles).
 - **`components/`**:
   - `bsec_bme680`: Handles BME680 sensor reading and BSEC algorithm processing.
   - `stock_monitor`: HTTPS client for fetching financial data.
   - `weather`: API client for weather data.
   - `wifi_connect`: Robust Wi-Fi state machine.
   - `device_server`: Authenticated local HTTP server for OTA uploads and device status.
-  - `time_manager`: SNTP synchronization.
+  - `time_manager`: SNTP synchronization and timezone conversion.
+  - `battery`: ADC battery/charger sensing, charge estimates and persistent runtime counters.
+  - `display`: LCD, touch input, backlight and LVGL task integration.
+  - `bsp`: Shared peripheral buses and board pin definitions.
+
+## Hardware Resources and Tools
+
+- `EXTRA/CAD/v1/`, `v2/` and `v3/`: SolidWorks enclosure assemblies and parts, with STL exports for available printable components.
+- `EXTRA/Docs/`: Board pinouts, battery-shield and sensor/display schematics, datasheets and a wiring spreadsheet.
+- `EXTRA/Media/`: Dashboard and expanded-screen reference photos.
+- `tools/plot_battery_soc_lut.py`: Plot the programmed voltage-to-charge estimate. Requires Python and Matplotlib; run from the repository root:
+
+  ```powershell
+  python -m pip install matplotlib
+  python tools/plot_battery_soc_lut.py
+  ```
+
+  The image is written to `build/battery_soc_lut.png`. The script keeps its own LUT; update it alongside the firmware LUT when changing the battery curve. This is an estimated charge curve, not a measured discharge test.
+
+Power-efficiency host checks are documented under **Battery Power Efficiency** below. Temporary SolidWorks lock files (`~$*`) are local editor artifacts and should not be committed.
 
 ## ⚙️ Configuration
 The project uses **Kconfig** for sensitive or adjustable settings.
@@ -77,7 +97,7 @@ The UI is designed using **SquareLine Studio**. The project file is located at:
 To modify the UI:
 1. Open the `.spj` file in SquareLine Studio.
 2. Make your changes (add screens, widgets, animations).
-3. Export the project to the `ui/` folder (ensure export path is set correctly in Project Settings).
+3. Export the project to `main/ui/` (ensure the export path is set correctly in Project Settings). Keep generated files as exported; add runtime behavior in `main/ui_updater.c`.
 
 ## 🚀 Building & Flashing
 
@@ -210,13 +230,21 @@ The firmware samples charger presence once per second and requires two consecuti
 
 The display remains on. The clock uses `HH:MM`, and clock/date plus environmental sensor widgets refresh together at wall-clock minute changes. The first real sensor sample is displayed as soon as it is available; BME680/BSEC processing still runs approximately every three seconds. The existing one-second UI timer continues charger detection, battery runtime, and network-status work; battery voltage and percentage are sampled every ten seconds. Settings runtime counters retain `HH:MM:SS` and can redraw every second while visible.
 
-After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower), LVGL refresh/touch periods change from 33 ms to 100 ms, and the display releases its no-light-sleep lock. ESP-IDF uses frequency scaling from 10 to 80 MHz and tickless idle to sleep between work. Touch on GPIO27 wakes the ESP32, restores the 33 ms periods and selected brightness, and blocks light sleep for the next active interval. Data updates do not reset the touch-idle timeout.
+After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower), LVGL refresh, touch and animation periods change from 33 ms to 1000 ms, and the display releases its no-light-sleep lock. ESP-IDF uses frequency scaling from 10 to 80 MHz and tickless idle to sleep between work. Idle LVGL work is grouped into approximately one pass per second; GPIO27 interrupts that wait immediately. Touch on GPIO27 wakes the ESP32, restores the 33 ms periods and selected brightness, and blocks light sleep for the next active interval. Data updates do not reset the touch-idle timeout.
 
 Backlight PWM uses the sleep-compatible RC_FAST clock with LEDC keep-alive. GPIO27 uses low-level wake and an interrupt masked until touch release; held presses continue through the existing LVGL input timer. LVGL time comes directly from `esp_timer`, with no recurring 2 ms tick timer.
 
-Wi-Fi sync runs once immediately after boot. With valid time, stock quotes then refresh at five-minute clock boundaries (`:00`, `:05`, and so on); weather and NTP join the hourly `:00` window. If time is unavailable, the scheduler retries on five-minute intervals until it can align to the clock. Manual sync requests can run immediately and share a Wi-Fi session with any pending work. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap.
+Wi-Fi sync runs once immediately after boot, including stocks even when the market is closed. With valid time, automatic stock refreshes run Monday through Friday on five-minute boundaries from 09:30 through 16:00 New York time, including a final 16:00 request. New York EST/EDT is calculated directly from UTC using US DST rules, independently of the Israel display timezone. Holidays and early closes are intentionally ignored. Weather and NTP run on hourly `:00` boundaries and share the stock window when due together; outside market hours the automatic windows are hourly. If time is unavailable, NTP recovery windows remain five minutes apart and HTTPS waits for valid time. Explicit manual requests run immediately, including stock refreshes outside market hours. Failed stock work waits for an eligible market window or another manual request; weather/NTP failures join existing windows without adding radio wakeups. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap.
 
-The reported runtime before minute-aligned presentation and automatic light sleep was almost 28 hours using two Panasonic NCR18650B cells in parallel. Runtime with the new features is not yet measured. Host checks cover minute scheduling, clock formatting, PM lock transitions, and touch interrupt rearming; physical PWM continuity, sleep entry, touch wake, and battery consumption still require on-device validation. OTA startup confirmation occurs before the normal idle-sleep event and does not validate these behaviors.
+Both Finnhub quotes are fetched consecutively without the old two-second pause. They share one certificate-verified HTTPS client, reusing its connection when the server permits persistence; a failed reused transport gets one fresh-connection retry. HTTP errors such as 429 are not immediately retried. The client is always destroyed before weather starts, releasing its TLS memory. BME680/BSEC remains in LP mode with approximately three-second sampling.
+
+Run `python tools/test_power_efficiency.py` with host GCC on PATH after an ESP-IDF build (or with `IDF_PATH` set). It compiles current production C functions with mocked RTOS, LVGL and HTTP APIs; checks cover US DST, scheduling/retries, idle wake timing, HTTP cleanup and quote parsing. Generated harnesses are kept in `build/power-efficiency-tests/`. These host checks do not establish physical touch latency, server connection reuse or battery runtime.
+
+ESP-IDF 5.4 builds currently rely on the local PWM/light-sleep SDK fix: `s_sleep_sub_mode_ref_cnt` in `components/esp_hw_support/sleep_modes.c` must use `RTC_SLOW_ATTR` rather than `RTC_FAST_ATTR`. This SDK change is outside this repository; retain it when reproducing this build to avoid the known idle backlight flicker.
+
+Reported battery runtime using two Panasonic NCR18650B cells in parallel improved from approximately 19 hours initially to approximately 28 hours. The latest confirmed 28-hour result belongs to the previously flashed firmware, including minute-aligned dashboard updates and automatic light sleep; use it as the baseline for the market-aware Wi-Fi and lower-idle-activity changes. These reports do not isolate the savings from individual features.
+
+The market-aware build was installed successfully over OTA on 2026-10-30 at `192.168.0.53`, slot `ota_1`, build identifier `e8e10892cb32`. The uploader verified the complete build hash and startup confirmation. Host checks passed for DST/scheduling, idle timing, HTTP batching and quote handling. Battery runtime and prolonged-idle touch behavior for this build remain unmeasured; startup confirmation does not validate them. The subsequent UI export dated 2026-10-31 is pending a clean rebuild and device validation; it is not part of that confirmed OTA image.
 
 A Phase 1 image without PM is saved locally at `build/power-save-phase1/SmartInfo7.bin`. If needed, restore it with `ota_update.bat DEVICE_IP build\power-save-phase1\SmartInfo7.bin`, or use USB recovery if the device is unreachable. Disabling `CONFIG_PM_ENABLE` also allows a recovery build; keep `CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y` for the level-triggered touch ISR.
 

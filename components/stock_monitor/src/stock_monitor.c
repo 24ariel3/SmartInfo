@@ -42,7 +42,7 @@ static double get_json_double(cJSON *json, const char *key) {
   return 0.0;
 }
 
-esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data) {
+static esp_err_t stock_build_url(const char *symbol, char *url, size_t url_size) {
   if (!symbol || !symbol[0]) return ESP_ERR_INVALID_ARG;
   char ticker[sizeof(s_stock_symbol_1)];
   size_t symbol_len = strlen(symbol);
@@ -51,50 +51,57 @@ esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data) {
     ticker[i] = (char)toupper((unsigned char)symbol[i]);
   }
 
-  char url[256];
-  snprintf(url, sizeof(url), FINNHUB_URL_TEMPLATE, ticker,
+  int length = snprintf(url, url_size, FINNHUB_URL_TEMPLATE, ticker,
            CONFIG_FINNHUB_API_KEY);
 
-  char *response_buffer = NULL;
-  esp_err_t err = wifi_perform_http_get(url, &response_buffer);
+  return length < 0 || (size_t)length >= url_size ? ESP_ERR_INVALID_SIZE : ESP_OK;
+}
 
-  if (err == ESP_OK && response_buffer != NULL) {
-    cJSON *json = cJSON_Parse(response_buffer);
-    if (json) {
-      cJSON *price = cJSON_GetObjectItem(json, "c");
-      if (cJSON_IsNumber(price) && price->valuedouble > 0) {
-        if (out_data) {
-          out_data->current_price = (float)get_json_double(json, "c");
-          out_data->change = (float)get_json_double(json, "d");
-          out_data->percent_change = (float)get_json_double(json, "dp");
-          out_data->high_price = (float)get_json_double(json, "h");
-          out_data->low_price = (float)get_json_double(json, "l");
-          out_data->open_price = (float)get_json_double(json, "o");
-          out_data->previous_close = (float)get_json_double(json, "pc");
-          // Timestamp 't' is int
-          cJSON *ts = cJSON_GetObjectItem(json, "t");
-          if (cJSON_IsNumber(ts)) {
-            out_data->timestamp = (int64_t)ts->valuedouble;
-          }
+static esp_err_t stock_parse_price(const char *symbol, const char *response,
+                                    stock_data_t *out_data) {
+  if (!response) return ESP_FAIL;
+  esp_err_t err;
+  cJSON *json = cJSON_Parse(response);
+  if (json) {
+    cJSON *price = cJSON_GetObjectItem(json, "c");
+    if (cJSON_IsNumber(price) && price->valuedouble > 0) {
+      if (out_data) {
+        out_data->current_price = (float)get_json_double(json, "c");
+        out_data->change = (float)get_json_double(json, "d");
+        out_data->percent_change = (float)get_json_double(json, "dp");
+        out_data->high_price = (float)get_json_double(json, "h");
+        out_data->low_price = (float)get_json_double(json, "l");
+        out_data->open_price = (float)get_json_double(json, "o");
+        out_data->previous_close = (float)get_json_double(json, "pc");
+        // Timestamp 't' is int
+        cJSON *ts = cJSON_GetObjectItem(json, "t");
+        if (cJSON_IsNumber(ts)) {
+          out_data->timestamp = (int64_t)ts->valuedouble;
         }
-        ESP_LOGI(TAG, "Stock %s: $%.2f", ticker,
-                 out_data ? out_data->current_price : 0.0f);
-        err = ESP_OK;
-      } else {
-        ESP_LOGW(TAG, "No valid quote for %s", ticker);
-        err = ESP_FAIL;
       }
-      cJSON_Delete(json);
+      ESP_LOGI(TAG, "Stock %s: $%.2f", symbol,
+               out_data ? out_data->current_price : 0.0f);
+      err = ESP_OK;
     } else {
-      ESP_LOGE(TAG, "Failed to parse JSON");
+      ESP_LOGW(TAG, "No valid quote for %s", symbol);
       err = ESP_FAIL;
     }
-    free(response_buffer);
+    cJSON_Delete(json);
   } else {
-    if (err == ESP_OK)
-      err = ESP_FAIL;
+    ESP_LOGE(TAG, "Failed to parse JSON");
+    err = ESP_FAIL;
   }
+  return err;
+}
 
+esp_err_t stock_fetch_price(const char *symbol, stock_data_t *out_data) {
+  char url[256];
+  esp_err_t err = stock_build_url(symbol, url, sizeof(url));
+  if (err != ESP_OK) return err;
+  char *response = NULL;
+  err = wifi_perform_http_get(url, &response);
+  if (err == ESP_OK) err = stock_parse_price(symbol, response, out_data);
+  free(response);
   return err;
 }
 
@@ -229,10 +236,24 @@ esp_err_t stock_monitor_refresh(void) {
 
   stock_data_t data1 = {0};
   stock_data_t data2 = {0};
-  bool ok1 = stock_fetch_price(symbol_1, &data1) == ESP_OK;
+  char url1[256], url2[256];
+  esp_err_t result1 = stock_build_url(symbol_1, url1, sizeof(url1));
+  esp_err_t result2 = stock_build_url(symbol_2, url2, sizeof(url2));
+  char *responses[2] = {NULL, NULL};
+  esp_err_t results[2] = {result1, result2};
+  if (result1 == ESP_OK && result2 == ESP_OK) {
+    const char *urls[] = {url1, url2};
+    wifi_perform_http_get_batch(urls, responses, results, 2);
+  } else {
+    // An invalid configured symbol must not prevent refreshing the other quote.
+    if (result1 == ESP_OK) results[0] = wifi_perform_http_get(url1, &responses[0]);
+    if (result2 == ESP_OK) results[1] = wifi_perform_http_get(url2, &responses[1]);
+  }
+  bool ok1 = results[0] == ESP_OK && stock_parse_price(symbol_1, responses[0], &data1) == ESP_OK;
+  bool ok2 = results[1] == ESP_OK && stock_parse_price(symbol_2, responses[1], &data2) == ESP_OK;
+  free(responses[0]);
+  free(responses[1]);
   if (!ok1) ESP_LOGW(TAG, "Failed to fetch %s", symbol_1);
-  vTaskDelay(pdMS_TO_TICKS(2000));
-  bool ok2 = stock_fetch_price(symbol_2, &data2) == ESP_OK;
   if (!ok2) ESP_LOGW(TAG, "Failed to fetch %s", symbol_2);
 
   bool updated = false;

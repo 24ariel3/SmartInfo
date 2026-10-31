@@ -20,6 +20,8 @@ extern lv_obj_t * ui_LabelDate;
 extern lv_obj_t * ui_LabelTime;
 extern lv_obj_t * ui_ImageWifiDis;
 extern lv_obj_t * ui_ImageWifiConn;
+extern lv_obj_t * ui_PanelStatusbarBatteryLevel;
+extern lv_obj_t * ui_LabelStatusbarBatteryLevel;
 extern lv_obj_t * ui_PanelIAQ;
 extern lv_obj_t * ui_Label9;
 extern lv_obj_t * ui_SliderAQI;

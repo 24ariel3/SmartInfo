@@ -45,7 +45,7 @@ static esp_pm_lock_handle_t s_display_awake_lock;
 #define DISPLAY_IDLE_DIM_MS 60000
 #define DISPLAY_IDLE_BRIGHTNESS_MAX 20
 #define DISPLAY_ACTIVE_PERIOD_MS 33
-#define DISPLAY_IDLE_PERIOD_MS 100
+#define DISPLAY_IDLE_PERIOD_MS 1000
 
 // Backlight PWM Configuration
 #ifdef BSP_LCD_BACKLIGHT
@@ -160,8 +160,12 @@ static void set_display_idle(bool idle, bool wake_touch_timer) {
   uint32_t period_ms = idle ? DISPLAY_IDLE_PERIOD_MS : DISPLAY_ACTIVE_PERIOD_MS;
   if (s_refresh_timer) lv_timer_set_period(s_refresh_timer, period_ms);
   if (s_touch_read_timer) lv_timer_set_period(s_touch_read_timer, period_ms);
-  if (!idle && wake_touch_timer && s_touch_read_timer)
-    lv_timer_ready(s_touch_read_timer);
+  lv_timer_t *animation_timer = lv_anim_get_timer();
+  if (animation_timer) lv_timer_set_period(animation_timer, period_ms);
+  if (!idle && wake_touch_timer) {
+    if (s_touch_read_timer) lv_timer_ready(s_touch_read_timer);
+    if (s_refresh_timer) lv_timer_ready(s_refresh_timer);
+  }
 
   apply_brightness(idle);
 #if CONFIG_PM_ENABLE
@@ -216,9 +220,10 @@ static void lvgl_task(void *arg) {
       }
 
       if (delay_ms == 0) delay_ms = 1;
-      uint32_t max_delay = s_display_idle ? DISPLAY_IDLE_PERIOD_MS
-                                          : DISPLAY_ACTIVE_PERIOD_MS;
-      if (delay_ms > max_delay) delay_ms = max_delay;
+      // Coalesce idle timers, including hidden animations, into one pass.
+      if (s_display_idle) delay_ms = DISPLAY_IDLE_PERIOD_MS;
+      else if (delay_ms > DISPLAY_ACTIVE_PERIOD_MS)
+        delay_ms = DISPLAY_ACTIVE_PERIOD_MS;
     } else {
       // FAILED to get lock - someone else has it
       // ESP_LOGW(TAG, "LVGL task couldn't get lock, yielding");

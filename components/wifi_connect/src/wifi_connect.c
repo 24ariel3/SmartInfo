@@ -330,6 +330,8 @@ bool wifi_has_saved_credentials(const char *ssid) {
 }
 
 // --- Centralized HTTP Logic ---
+#include <inttypes.h>
+#include "esp_timer.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 static SemaphoreHandle_t s_http_mutex = NULL;
@@ -340,113 +342,136 @@ static void ensure_http_mutex(void) {
   }
 }
 
-// Helper to read HTTP response into a dynamic buffer
-static char *http_download_to_buffer(esp_http_client_handle_t client,
-                                     int *out_len) {
-  int64_t content_length = esp_http_client_get_content_length(client);
-  if (content_length > INT_MAX - 1) return NULL;
-  int capacity = content_length > 0 ? (int)content_length : 1024;
-  char *buffer = malloc((size_t)capacity + 1);
-  if (buffer == NULL) {
-    ESP_LOGE(TAG, "Failed to allocate %d bytes for response", capacity);
-    return NULL;
+typedef struct {
+  char *data;
+  size_t length;
+  size_t capacity;
+  esp_err_t error;
+  unsigned connections;
+} http_response_t;
+
+static esp_err_t http_response_event(esp_http_client_event_t *event) {
+  http_response_t *response = event->user_data;
+  if (event->event_id == HTTP_EVENT_ON_CONNECTED) response->connections++;
+  if (event->event_id != HTTP_EVENT_ON_DATA || response->error != ESP_OK ||
+      esp_http_client_get_status_code(event->client) != 200)
+    return response->error;
+
+  if (event->data_len < 0 || (size_t)event->data_len > INT_MAX - 1 - response->length) {
+    response->error = ESP_ERR_INVALID_SIZE;
+    return response->error;
+  }
+  size_t needed = response->length + (size_t)event->data_len + 1;
+  if (needed > response->capacity) {
+    size_t capacity = response->capacity;
+    if (capacity == 0) {
+      int64_t expected = esp_http_client_get_content_length(event->client);
+      if (expected > INT_MAX - 1) {
+        response->error = ESP_ERR_INVALID_SIZE;
+        return response->error;
+      }
+      capacity = expected > 0 ? (size_t)expected + 1 : 1024;
+    }
+    while (capacity < needed) {
+      if (capacity > (INT_MAX - 1) / 2) { capacity = needed; break; }
+      capacity *= 2;
+    }
+    char *data = realloc(response->data, capacity);
+    if (!data) {
+      response->error = ESP_ERR_NO_MEM;
+      return response->error;
+    }
+    response->data = data;
+    response->capacity = capacity;
+  }
+  if (event->data_len) memcpy(response->data + response->length, event->data, event->data_len);
+  response->length += event->data_len;
+  response->data[response->length] = 0;
+  return ESP_OK;
+}
+
+static bool http_transport_error(esp_err_t err) {
+  return err == ESP_ERR_HTTP_CONNECT || err == ESP_ERR_HTTP_CONNECTION_CLOSED ||
+         err == ESP_ERR_HTTP_WRITE_DATA || err == ESP_ERR_HTTP_FETCH_HEADER ||
+         err == ESP_ERR_TIMEOUT;
+}
+
+esp_err_t wifi_perform_http_get_batch(const char *const *urls, char **out_buffers,
+                                     esp_err_t *out_results, size_t count) {
+  if (!urls || !out_buffers || !out_results || count == 0) return ESP_ERR_INVALID_ARG;
+  for (size_t i = 0; i < count; ++i) {
+    out_buffers[i] = NULL;
+    out_results[i] = ESP_ERR_INVALID_ARG;
+  }
+  for (size_t i = 0; i < count; ++i)
+    if (!urls[i] || !urls[i][0]) return ESP_ERR_INVALID_ARG;
+
+  ensure_http_mutex();
+  esp_err_t err = !s_http_mutex ? ESP_ERR_NO_MEM :
+                 xSemaphoreTake(s_http_mutex, pdMS_TO_TICKS(10000)) == pdTRUE ?
+                 ESP_OK : ESP_ERR_TIMEOUT;
+  if (err != ESP_OK) {
+    for (size_t i = 0; i < count; ++i) out_results[i] = err;
+    return err;
   }
 
-  int total_read = 0;
-  while (1) {
-    char extra;
-    bool full = total_read == capacity;
-    int read_len = esp_http_client_read(client, full ? &extra : buffer + total_read,
-                                        full ? 1 : capacity - total_read);
-    if (read_len <= 0) {
-      if (read_len < 0 || !esp_http_client_is_complete_data_received(client)) {
-        ESP_LOGE(TAG, "HTTP response incomplete");
-        free(buffer);
-        return NULL;
+  int64_t started = esp_timer_get_time();
+  http_response_t response = {0};
+  esp_http_client_handle_t client = NULL;
+  esp_err_t first_error = ESP_OK;
+  for (size_t i = 0; i < count; ++i) {
+    bool reused = client != NULL;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      response.error = ESP_OK;
+      if (!client) {
+        esp_http_client_config_t config = {
+            .url = urls[i], .method = HTTP_METHOD_GET, .timeout_ms = 20000,
+            .crt_bundle_attach = esp_crt_bundle_attach, .disable_auto_redirect = true,
+            .event_handler = http_response_event, .user_data = &response,
+        };
+        client = esp_http_client_init(&config);
+        err = client ? ESP_OK : ESP_ERR_NO_MEM;
+      } else {
+        err = esp_http_client_set_url(client, urls[i]);
       }
-      break;
+      if (err == ESP_OK) err = esp_http_client_perform(client);
+      if (response.error != ESP_OK) err = response.error;
+      int status = client ? esp_http_client_get_status_code(client) : 0;
+      if (err == ESP_OK && !esp_http_client_is_complete_data_received(client))
+        err = ESP_ERR_HTTP_FETCH_HEADER;
+      bool retry = reused && attempt == 0 && http_transport_error(err);
+      if (err == ESP_OK && status != 200) {
+        ESP_LOGW(TAG, "HTTP GET failed status code: %d", status);
+        err = ESP_FAIL;
+      }
+      if (err == ESP_OK && !response.data) {
+        response.data = calloc(1, 1);
+        if (!response.data) err = ESP_ERR_NO_MEM;
+      }
+      if (err == ESP_OK) {
+        out_buffers[i] = response.data;
+      } else {
+        free(response.data);
+        if (client) esp_http_client_cleanup(client);
+        client = NULL;
+      }
+      response.data = NULL;
+      response.length = response.capacity = 0;
+      if (!retry) break;
     }
-    if (full) {
-      if (capacity > (INT_MAX - 1) / 2) {
-        free(buffer);
-        return NULL;
-      }
-      char *new_buffer = realloc(buffer, (size_t)capacity * 2 + 1);
-      if (!new_buffer) {
-        ESP_LOGE(TAG, "Failed to reallocate buffer");
-        free(buffer);
-        return NULL;
-      }
-      buffer = new_buffer;
-      capacity *= 2;
-      buffer[total_read] = extra;
-    }
-    total_read += read_len;
-    if (content_length > 0 && total_read == content_length) break;
+    out_results[i] = err;
+    if (first_error == ESP_OK && err != ESP_OK) first_error = err;
   }
-  buffer[total_read] = 0; // Null terminate
-  if (out_len)
-    *out_len = total_read;
-  return buffer;
+  if (client) esp_http_client_cleanup(client);
+  ESP_LOGD(TAG, "HTTPS batch: requests=%u, connections=%u, duration=%" PRId64 " ms",
+           (unsigned)count, response.connections, (esp_timer_get_time() - started) / 1000);
+  xSemaphoreGive(s_http_mutex);
+  return first_error;
 }
 
 esp_err_t wifi_perform_http_get(const char *url, char **out_buffer) {
-  if (url == NULL || out_buffer == NULL)
-    return ESP_ERR_INVALID_ARG;
-
-  ensure_http_mutex();
-  if (xSemaphoreTake(s_http_mutex, pdMS_TO_TICKS(10000)) !=
-      pdTRUE) { // Increased timeout
-    ESP_LOGE(TAG, "Failed to acquire HTTP mutex");
-    return ESP_ERR_TIMEOUT;
-  }
-
-  esp_err_t ret = ESP_FAIL;
-  *out_buffer = NULL;
-
-  esp_http_client_config_t config = {
-      .url = url,
-      .method = HTTP_METHOD_GET,
-      .timeout_ms = 20000,
-      .crt_bundle_attach = esp_crt_bundle_attach,
-      .disable_auto_redirect = true,
-  };
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (!client) {
-    ESP_LOGE(TAG, "Failed to init http client");
-    xSemaphoreGive(s_http_mutex);
-    return ESP_FAIL;
-  }
-
-  esp_err_t err = esp_http_client_open(client, 0);
-  if (err == ESP_OK) {
-    int content_length = esp_http_client_fetch_headers(client);
-    if (content_length >= 0 || content_length == ESP_ERR_HTTP_FETCH_HEADER) {
-      int status_code = esp_http_client_get_status_code(client);
-      if (status_code == 200) {
-        int data_len = 0;
-        char *resp = http_download_to_buffer(client, &data_len);
-        if (resp) {
-          *out_buffer = resp;
-          ret = ESP_OK;
-        }
-      } else {
-        ESP_LOGE(TAG, "HTTP GET failed status code: %d", status_code);
-      }
-    } else {
-      ESP_LOGE(TAG, "Failed to fetch headers");
-    }
-  } else {
-    ESP_LOGE(TAG, "HTTP open failed: %s (heap=%lu, largest=%lu)",
-             esp_err_to_name(err),
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  }
-
-  esp_http_client_cleanup(client);
-  xSemaphoreGive(s_http_mutex);
-  return ret;
+  esp_err_t result;
+  return wifi_perform_http_get_batch(&url, out_buffer, &result, 1);
 }
 
 char *wifi_scan_networks(void) {

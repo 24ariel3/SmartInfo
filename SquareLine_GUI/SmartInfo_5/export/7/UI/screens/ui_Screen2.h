@@ -62,11 +62,22 @@ extern lv_obj_t * ui_ContainerSwttingsBrightness;
 extern lv_obj_t * ui_LabelSettingsBrightness;
 extern lv_obj_t * ui_SliderSettingsScreenBrightness;
 extern lv_obj_t * ui_ContainerSettingsBattery;
+extern lv_obj_t * ui_ContainerSettingsBatteryLevel;
 extern lv_obj_t * ui_LabelSettingsBatteryLevel;
-extern lv_obj_t * ui_ContainerSettingsBatteryLevelPercentage;
-extern lv_obj_t * ui_LabelSettingsBatteryLevelPercentage;
 extern lv_obj_t * ui_ContainerSettingsBatteryLevelRaw;
 extern lv_obj_t * ui_LabelSettingsBatteryLevelRaw;
+extern lv_obj_t * ui_ContainerSettingsBatteryLevelPercentage;
+extern lv_obj_t * ui_LabelSettingsBatteryLevelPercentage;
+extern lv_obj_t * ui_ContainerSettingsBatteryTime;
+extern lv_obj_t * ui_ContainerSettingsBatteryTimeString;
+extern lv_obj_t * ui_LabelSettingBatterTimeString;
+extern lv_obj_t * ui_ContainerSettingsBatteryTimeCounter;
+extern lv_obj_t * ui_LabelSettingsBatteryTimeCounter;
+extern lv_obj_t * ui_ContainerSettingsPrevBatteryTime;
+extern lv_obj_t * ui_ContainerSettingsBatteryPrevTimeString;
+extern lv_obj_t * ui_LabelSettingBatteryPrevTimeString;
+extern lv_obj_t * ui_ContainerSettingsBatteryPrevTimeCounter;
+extern lv_obj_t * ui_LabelSettingsBatteryPrevTimeCounter;
 extern lv_obj_t * ui_Keyboard;
 // CUSTOM VARIABLES
 
