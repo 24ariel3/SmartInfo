@@ -145,7 +145,8 @@ For the first installation:
    64-character hexadecimal bearer token. Generate one with
    `python -c "import secrets; print(secrets.token_hex(32))"`. Keep it in local
    `sdkconfig`; do not commit it. An empty or invalid token disables the server.
-2. Run `idf.py build` and `idf.py -p COM4 flash`. This installs the bootloader,
+2. Run `idf.py build` and `idf.py -p COMx flash` (replace `COMx` with your serial port).
+   This installs the bootloader,
    partition table, OTA metadata, and application. Do not use `erase-flash`;
    existing NVS settings and sensor state are preserved.
 3. Connect using the Wi-Fi screen once. The device remembers the last successful
@@ -157,12 +158,12 @@ For subsequent updates, build the firmware and use the Windows batch helper:
 
 ```powershell
 idf.py build
-.\ota_update.bat 192.168.0.53
+.\ota_update.bat DEVICE_IP
 ```
 
-Replace the IP with your device's address. The helper defaults to
+Replace `DEVICE_IP` with your device's address. The helper defaults to
 `build\SmartInfo7.bin`; an optional second argument selects another application:
-`ota_update.bat 192.168.0.53 "C:\firmware\SmartInfo7.bin"`.
+`ota_update.bat DEVICE_IP "path\to\SmartInfo7.bin"`.
 It uses `SMARTINFO_OTA_TOKEN` when set, otherwise reads the token from local
 `sdkconfig`, without printing it. It checks readiness, uploads, and verifies that
 the exact build is confirmed in the other slot after reboot. A rollback or failed
@@ -246,7 +247,7 @@ After 60 seconds without touch, the backlight is capped at 20% (or the user-sele
 
 Backlight PWM uses the sleep-compatible RC_FAST clock with LEDC keep-alive. GPIO27 uses low-level wake and an interrupt masked until touch release; held presses continue through the existing LVGL input timer. LVGL time comes directly from `esp_timer`, with no recurring 2 ms tick timer.
 
-Wi-Fi sync runs once immediately after boot, including stocks even when the market is closed. With valid time, automatic stock refreshes run Monday through Friday on five-minute boundaries from 09:30 through 16:00 New York time, including a final 16:00 request. New York EST/EDT is calculated directly from UTC using US DST rules, independently of the Israel display timezone. Holidays and early closes are intentionally ignored. Weather and NTP run on hourly `:00` boundaries and share the stock window when due together; outside market hours the automatic windows are hourly. If time is unavailable, NTP recovery windows remain five minutes apart and HTTPS waits for valid time. Explicit manual requests run immediately, including stock refreshes outside market hours. Failed stock work waits for an eligible market window or another manual request; weather/NTP failures join existing windows without adding radio wakeups. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap.
+Wi-Fi sync runs once immediately after boot, including stocks even when the market is closed. With valid time, automatic stock refreshes run Monday through Friday on five-minute boundaries from 09:30 through 16:00 New York time, including a final 16:00 request. New York EST/EDT is calculated directly from UTC using US DST rules, independently of the configured display timezone. Holidays and early closes are intentionally ignored. Weather and NTP run on hourly `:00` boundaries and share the stock window when due together; outside market hours the automatic windows are hourly. If time is unavailable, NTP recovery windows remain five minutes apart and HTTPS waits for valid time. Explicit manual requests run immediately, including stock refreshes outside market hours. Failed stock work waits for an eligible market window or another manual request; weather/NTP failures join existing windows without adding radio wakeups. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap.
 
 Ticker-symbol labels on the dashboard and expanded panels use `2ECC71` while the market is open and `BBDED6` while closed or the clock is not yet valid. Market-open status is Monday through Friday, 09:30 inclusive to 16:00 exclusive in New York, ignoring holidays and early closes. Colors are checked at initialization and minute changes, independently of Wi-Fi and quote updates. At 16:00 the ticker colors show closed while the final scheduled quote is still fetched. Current-price, percentage-change and direction-indicator styling is unchanged.
 
@@ -256,11 +257,9 @@ Run `python tools/test_power_efficiency.py` with host GCC on PATH after an ESP-I
 
 ESP-IDF 5.4 builds currently rely on the local PWM/light-sleep SDK fix: `s_sleep_sub_mode_ref_cnt` in `components/esp_hw_support/sleep_modes.c` must use `RTC_SLOW_ATTR` rather than `RTC_FAST_ATTR`. This SDK change is outside this repository; retain it when reproducing this build to avoid the known idle backlight flicker.
 
-Reported battery runtime using two Panasonic NCR18650B cells in parallel improved from approximately 19 hours initially to approximately 28 hours. The latest confirmed 28-hour result belongs to the previously flashed firmware, including minute-aligned dashboard updates and automatic light sleep; use it as the baseline for the market-aware Wi-Fi and lower-idle-activity changes. These reports do not isolate the savings from individual features.
+A reference setup using two Panasonic NCR18650B cells in parallel achieved approximately 32.5 hours per charge with market-aware Wi-Fi scheduling and reduced idle UI activity. Runtime depends on battery condition, brightness, touch activity, network conditions and the market schedule; this is a reference measurement rather than a guaranteed runtime.
 
-The market-aware build was installed successfully over OTA on 2026-10-30 at `192.168.0.53`, slot `ota_1`, build identifier `e8e10892cb32`. The uploader verified the complete build hash and startup confirmation. Host checks passed for DST/scheduling, idle timing, HTTP batching and quote handling. Battery runtime and prolonged-idle touch behavior for this build remain unmeasured; startup confirmation does not validate them. The subsequent UI export dated 2026-10-31 is included in a clean build with the shorter date, rounded humidity and ticker market-status colors. This newer image has not been flashed; the 2026-10-30 OTA remains the last confirmed device image.
-
-A Phase 1 image without PM is saved locally at `build/power-save-phase1/SmartInfo7.bin`. If needed, restore it with `ota_update.bat DEVICE_IP build\power-save-phase1\SmartInfo7.bin`, or use USB recovery if the device is unreachable. Disabling `CONFIG_PM_ENABLE` also allows a recovery build; keep `CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y` for the level-triggered touch ISR.
+For recovery, flash a known-good firmware image over USB if the device is unreachable over Wi-Fi. Disabling `CONFIG_PM_ENABLE` also allows a recovery build; keep `CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y` for the level-triggered touch ISR.
 
 ### BME680 Wiring
 
