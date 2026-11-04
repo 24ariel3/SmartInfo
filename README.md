@@ -239,6 +239,15 @@ The battery voltage divider uses 100 kÎ© from battery BAT+ to GPIO 34 and 100 kÎ
 
 The firmware samples charger presence once per second and requires two consecutive readings beyond its 0.8 V connected / 0.4 V disconnected thresholds. The current and previous battery-run counters are displayed as `HH:MM:SS`; NVS stores them once per minute and on charger-state changes. While charging, the raw-voltage label shows `Charging`; the percentage remains voltage-based.
 
+### Environmental Heat Compensation
+
+The BSEC integration supplies a fixed `+3.5` degrees Celsius enclosure heat-source
+offset. BSEC uses it to reduce compensated temperature and recalculate compensated
+relative humidity; raw sensor readings remain unchanged. This adds to BSEC's own
+sensor-heater compensation, rather than changing the display values directly.
+See [BME680 component calibration](components/bsec_bme680/README.md#enclosure-heat-compensation)
+for the constant to adjust and reference-measurement guidance.
+
 ### Battery Power Efficiency
 
 The display remains on. The clock uses `HH:MM` and the date uses `DD/MM/YY`; clock/date plus environmental sensor widgets refresh together at wall-clock minute changes. Current humidity is rounded to the nearest integer for display (half upward, without a math-library dependency); underlying sensor values remain unchanged. The first real sensor sample is displayed as soon as it is available; BME680/BSEC processing still runs approximately every three seconds. The existing one-second UI timer continues charger detection, battery runtime, and network-status work; battery voltage and percentage are sampled every ten seconds. Settings runtime counters retain `HH:MM:SS` and can redraw every second while visible.

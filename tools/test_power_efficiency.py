@@ -410,9 +410,55 @@ int main(void) {
     assert 'update_stock_market_ui(time(NULL))' in function(ui, 'ui_updater_init')
     run('dashboard', mock + declarations + sensor_type + helpers + main)
 
+
+def bsec_input_tests():
+    integration = source('components/bsec_bme680/src/bsec_integration.c')
+    offset = re.search(r'^#define BSEC_HEAT_SOURCE_OFFSET_C .*', integration, re.M)[0]
+    start = integration.index('          bsec_input_t inputs[')
+    end = integration.index('          bsec_output_t outputs[', start)
+    packing = integration[start:end]
+    harness = r"""
+#include "bsec_datatypes.h"
+static int64_t bsec_get_timestamp_ns(void) {return 9876543210LL;}
+static uint8_t pack_inputs(uint32_t mask,bsec_input_t *out) {
+ bsec_bme_settings_t sensor_settings={.process_data=mask};
+ struct {float temperature,humidity,pressure,gas_resistance;} data={31.5f,45.0f,101325.0f,100000.0f};
+""" + packing + r"""
+ memcpy(out,inputs,sizeof(inputs));return n_inputs;
+}
+static void check(uint32_t mask,int expected,bool heat_expected) {
+ bsec_input_t inputs[BSEC_MAX_PHYSICAL_SENSOR];
+ uint8_t count=pack_inputs(mask,inputs);assert(count==expected && count<=BSEC_MAX_PHYSICAL_SENSOR);
+ int heat_count=0;
+ for(uint8_t i=0;i<count;i++) {
+  assert(inputs[i].time_stamp==9876543210LL && inputs[i].signal_dimensions==1);
+  switch(inputs[i].sensor_id) {
+   case BSEC_INPUT_HEATSOURCE:assert(inputs[i].signal==3.5f);heat_count++;break;
+   case BSEC_INPUT_TEMPERATURE:assert(inputs[i].signal==31.5f);break;
+   case BSEC_INPUT_HUMIDITY:assert(inputs[i].signal==45.0f);break;
+   case BSEC_INPUT_PRESSURE:assert(inputs[i].signal==101325.0f);break;
+   case BSEC_INPUT_GASRESISTOR:assert(inputs[i].signal==100000.0f);break;
+   default:assert(false);
+  }
+ }
+ assert(heat_count==(heat_expected?1:0));
+}
+int main(void) {
+ uint32_t heat=1u<<(BSEC_INPUT_HEATSOURCE-1);
+ uint32_t raw=BSEC_PROCESS_TEMPERATURE|BSEC_PROCESS_HUMIDITY|BSEC_PROCESS_PRESSURE|BSEC_PROCESS_GAS;
+ check(raw|heat,5,true);check(raw,4,false);
+ check(BSEC_PROCESS_TEMPERATURE|BSEC_PROCESS_HUMIDITY|heat,3,true);
+ check(heat,1,true);check(BSEC_PROCESS_TEMPERATURE,1,false);check(0,0,false);
+ puts("PASS: BSEC +3.5 C heat input, requested-mask handling, raw values and scalar metadata");
+}
+"""
+    run('bsec_inputs', offset + '\n' + harness,
+        ['-I' + str(ROOT / 'components/bsec_bme680/include')])
+
 if __name__ == '__main__':
     schedule_tests()
     display_tests()
     http_tests()
     stock_tests()
     dashboard_tests()
+    bsec_input_tests()

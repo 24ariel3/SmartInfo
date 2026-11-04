@@ -26,3 +26,17 @@ Because the BSEC library is proprietary, you must download it from Bosch Sensort
 *   `include/`: Header files (BSEC API + `bsec_integration.h`).
 *   `lib/`: Static library `libalgobsec.a`.
 *   `src/`: Integration source code.
+
+## Enclosure Heat Compensation
+
+`BSEC_HEAT_SOURCE_OFFSET_C` in `src/bsec_integration.c` supplies an additional
+`+3.5` degrees Celsius to `BSEC_INPUT_HEATSOURCE` when BSEC requests that input.
+BSEC subtracts this value when calculating compensated temperature and uses the
+corrected temperature to calculate compensated relative humidity. Raw temperature
+and humidity inputs remain unchanged; no separate UI offset is applied.
+
+The positive offset represents excess enclosure heat, in addition to the
+sensor-heater correction already handled by the loaded BSEC profile. It is a
+fixed calibration value: verify it against an ambient reference after the device
+has warmed up in its normal enclosure and power mode. Adjust the constant and
+rebuild if the thermal setup changes. Saved BSEC state and LP sampling are retained.
