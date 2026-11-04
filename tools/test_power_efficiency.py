@@ -223,6 +223,40 @@ int main(void) {
 }
 ''')
 
+    pwm = '\n'.join(re.findall(r'^#define (?:LCD_BACKLIGHT_LEDC_\w+|DISPLAY_IDLE_BRIGHTNESS_MAX).*', text, re.M))
+    backlight_mock = r"""
+#define BSP_LCD_BACKLIGHT 4
+#define LEDC_TIMER_0 0
+#define LEDC_LOW_SPEED_MODE 0
+#define LEDC_CHANNEL_0 0
+#define LEDC_TIMER_8_BIT 8
+#define LEDC_TIMER_10_BIT 10
+static uint8_t s_selected_brightness=100;
+static int s_applied_brightness=-1;
+static uint32_t duty;
+static unsigned writes,updates;
+static int ledc_set_duty(int mode,int channel,uint32_t value){assert(mode==0 && channel==0 && value<=(1u<<LCD_BACKLIGHT_LEDC_RES));duty=value;writes++;return ESP_OK;}
+static int ledc_update_duty(int mode,int channel){assert(mode==0 && channel==0);updates++;return ESP_OK;}
+"""
+    run('backlight', pwm + '\n' + backlight_mock + function(text, 'apply_brightness') + r"""
+int main(void) {
+ assert(LCD_BACKLIGHT_LEDC_FREQ==25000 && LCD_BACKLIGHT_LEDC_RES==8);
+ assert(LCD_BACKLIGHT_LEDC_FREQ*(1u<<LCD_BACKLIGHT_LEDC_RES)<=8000000u);
+ apply_brightness(false);assert(duty==256 && writes==1 && updates==1);
+ apply_brightness(false);assert(writes==1);
+ apply_brightness(true);assert(duty==51 && s_applied_brightness==20);
+ apply_brightness(true);assert(writes==2);
+ s_selected_brightness=10;apply_brightness(true);assert(duty==25 && s_applied_brightness==10);
+ s_selected_brightness=0;apply_brightness(false);assert(duty==0);
+ s_selected_brightness=50;apply_brightness(false);assert(duty==128);
+ s_selected_brightness=100;apply_brightness(false);assert(duty==256 && writes==updates);
+ puts("PASS: ultrasonic backlight configuration, duty scaling, full-on output and idle dimming");
+}
+""")
+    init = function(text, 'display_init')
+    assert '.clk_cfg = LEDC_USE_RC_FAST_CLK' in init
+    assert '.sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE' in init
+
 
 def http_tests():
     text = source('components/wifi_connect/src/wifi_connect.c')
@@ -455,6 +489,184 @@ int main(void) {
     run('bsec_inputs', offset + '\n' + harness,
         ['-I' + str(ROOT / 'components/bsec_bme680/include')])
 
+
+def battery_keep_alive_tests():
+    battery = re.sub(r'^#include[^\n]*\n', '', source('components/battery/src/battery.c'), flags=re.M)
+    bsp = source('components/bsp/include/bsp.h')
+    pin = re.search(r'^#define BSP_BAT_KEEP_ALIVE .*', bsp, re.M)[0]
+    mock = r"""
+#define GPIO_NUM_33 33
+#define BSP_BAT_SENSE 34
+#define BSP_CHARGER_SENSE 35
+#define GPIO_MODE_OUTPUT 1
+#define GPIO_PULLUP_DISABLE 0
+#define GPIO_PULLDOWN_DISABLE 0
+#define GPIO_INTR_DISABLE 0
+#define ESP_TIMER_TASK 0
+#define ESP_ERR_NOT_FINISHED 10
+#define ESP_ERR_NOT_SUPPORTED 12
+#define ESP_ERR_NVS_NOT_FOUND 11
+#define NVS_READWRITE 0
+#define ADC_ATTEN_DB_12 12
+#define ADC_BITWIDTH_DEFAULT 12
+#define portMUX_INITIALIZER_UNLOCKED 0
+typedef int portMUX_TYPE;
+static int critical_depth;
+#define portENTER_CRITICAL(lock) assert(critical_depth++==0)
+#define portEXIT_CRITICAL(lock) assert(--critical_depth==0)
+typedef struct {uint64_t pin_bit_mask;int mode,pull_up_en,pull_down_en,intr_type;} gpio_config_t;
+typedef struct {void (*callback)(void *);void *arg;int dispatch_method;const char *name;bool skip_unhandled_events;} esp_timer_create_args_t;
+typedef struct {esp_timer_create_args_t args;bool created,active;uint64_t alarm,period;} mock_timer_t;
+typedef mock_timer_t *esp_timer_handle_t;
+static mock_timer_t timers[2];
+static int64_t clock_us=1000000;
+static unsigned create_calls,fail_create,periodic_starts,rising_edges;
+static bool fail_periodic,fail_release;
+static int gpio_level;
+static bool gpio_output,sleep_override_disabled;
+static void (*arm_hook)(void);
+static int64_t esp_timer_get_time(void) {return clock_us;}
+static esp_err_t esp_timer_create(const esp_timer_create_args_t *args,esp_timer_handle_t *out) {
+ assert(!critical_depth && args->dispatch_method==ESP_TIMER_TASK && !args->skip_unhandled_events);
+ if(++create_calls==fail_create)return ESP_ERR_NO_MEM;
+ for(size_t i=0;i<2;i++)if(!timers[i].created) {timers[i]=(mock_timer_t){.args=*args,.created=true};*out=&timers[i];return ESP_OK;}
+ assert(false);return ESP_FAIL;
+}
+static bool esp_timer_is_active(esp_timer_handle_t timer) {assert(timer && !critical_depth);return timer->active;}
+static esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer,uint64_t period) {
+ assert(timer && !critical_depth && period==20000000);
+ if(fail_periodic){fail_periodic=false;return ESP_FAIL;}
+ if(timer->active)return ESP_ERR_INVALID_STATE;
+ timer->active=true;timer->period=period;timer->alarm=clock_us+period;periodic_starts++;return ESP_OK;
+}
+static esp_err_t esp_timer_start_once(esp_timer_handle_t timer,uint64_t delay) {
+ assert(timer && !critical_depth && delay==200000);
+ if(fail_release){fail_release=false;return ESP_FAIL;}
+ if(timer->active)return ESP_ERR_INVALID_STATE;
+ timer->active=true;timer->period=0;timer->alarm=clock_us+delay;
+ if(arm_hook){void (*hook)(void)=arm_hook;arm_hook=NULL;hook();}
+ return ESP_OK;
+}
+static esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
+ assert(timer && !critical_depth);
+ if(!timer->active)return ESP_ERR_INVALID_STATE;
+ timer->active=false;return ESP_OK;
+}
+static esp_err_t esp_timer_delete(esp_timer_handle_t timer) {
+ assert(timer && !timer->active && !critical_depth);timer->created=false;return ESP_OK;
+}
+static esp_err_t gpio_set_level(int pin,int level) {
+ assert(pin==33);
+ if(level){assert(critical_depth && gpio_output && sleep_override_disabled && timers[0].active);if(!gpio_level)rising_edges++;}
+ gpio_level=level;return ESP_OK;
+}
+static esp_err_t gpio_config(const gpio_config_t *config) {
+ assert(config->pin_bit_mask==(1ULL<<33) && config->mode==GPIO_MODE_OUTPUT && !gpio_level);
+ assert(!config->pull_up_en && !config->pull_down_en && !config->intr_type);gpio_output=true;return ESP_OK;
+}
+static esp_err_t gpio_sleep_sel_dis(int pin) {assert(pin==33);sleep_override_disabled=true;return ESP_OK;}
+typedef int adc_unit_t;
+typedef int adc_channel_t;
+typedef void *adc_oneshot_unit_handle_t;
+typedef void *adc_cali_handle_t;
+typedef struct {int unit_id;} adc_oneshot_unit_init_cfg_t;
+typedef struct {int atten,bitwidth;} adc_oneshot_chan_cfg_t;
+typedef struct {int unit_id,atten,bitwidth,default_vref;} adc_cali_line_fitting_config_t;
+static int charger_mv;
+static bool adc_failure;
+static esp_err_t adc_oneshot_io_to_channel(int pin,adc_unit_t *unit,adc_channel_t *channel){*unit=1;*channel=pin;return ESP_OK;}
+static esp_err_t adc_oneshot_new_unit(const adc_oneshot_unit_init_cfg_t *config,adc_oneshot_unit_handle_t *out){*out=(void *)1;return ESP_OK;}
+static esp_err_t adc_oneshot_config_channel(adc_oneshot_unit_handle_t adc,adc_channel_t channel,const adc_oneshot_chan_cfg_t *config){return ESP_OK;}
+static esp_err_t adc_cali_create_scheme_line_fitting(const adc_cali_line_fitting_config_t *config,adc_cali_handle_t *out){*out=(void *)1;return ESP_OK;}
+static esp_err_t adc_oneshot_read(adc_oneshot_unit_handle_t adc,adc_channel_t channel,int *raw){if(channel==35 && adc_failure)return ESP_FAIL;*raw=channel==35?charger_mv:2000;return ESP_OK;}
+static esp_err_t adc_cali_raw_to_voltage(adc_cali_handle_t cal,int raw,int *mv){*mv=raw;return ESP_OK;}
+typedef int nvs_handle_t;
+static esp_err_t nvs_open(const char *name,int mode,nvs_handle_t *out){*out=1;return ESP_OK;}
+static esp_err_t nvs_get_blob(nvs_handle_t handle,const char *key,void *out,size_t *size){return ESP_ERR_NVS_NOT_FOUND;}
+static esp_err_t nvs_set_blob(nvs_handle_t handle,const char *key,const void *value,size_t size){return ESP_OK;}
+static esp_err_t nvs_commit(nvs_handle_t handle){return ESP_OK;}
+"""
+    checks = r"""
+static void advance_to(int64_t target) {
+ assert(target>=clock_us);
+ for(unsigned count=0;count<1000;count++) {
+  mock_timer_t *next=NULL;
+  for(size_t i=0;i<2;i++)if(timers[i].active && timers[i].alarm<=(uint64_t)target && (!next || timers[i].alarm<next->alarm))next=&timers[i];
+  if(!next){clock_us=target;return;}
+  if(next->alarm>(uint64_t)clock_us)clock_us=next->alarm;
+  if(next->period)next->alarm+=next->period;else next->active=false;
+  next->args.callback(next->args.arg);
+ }
+ assert(false);
+}
+static esp_err_t sample(int mv) {
+ uint64_t current,previous;bool connected;charger_mv=mv;
+ return battery_runtime_update(&current,&previous,&connected);
+}
+static void disconnect_charger(void) {
+ assert(sample(0)==ESP_OK);assert(sample(0)==ESP_OK);
+ assert(!battery_charger_connected && battery_keep_alive_enabled && battery_keep_alive_timer->active);
+}
+static void connect_during_arm(void) {assert(sample(1200)==ESP_OK);assert(battery_charger_connected);}
+int main(void) {
+ // Every partial initialization failure leaves KEY released and frees both timers.
+ for(unsigned stage=1;stage<=3;stage++) {
+  create_calls=0;fail_create=stage<=2?stage:0;fail_periodic=stage==3;
+  assert(battery_init()!=ESP_OK && !gpio_level && !battery_keep_alive_enabled);
+  assert(!timers[0].created && !timers[1].created && !battery_keep_alive_timer && !battery_keep_alive_release_timer);
+ }
+ create_calls=fail_create=0;
+ assert(battery_init()==ESP_OK && !gpio_level && battery_keep_alive_enabled);
+ assert(battery_keep_alive_timer->alarm==21000000 && !battery_keep_alive_release_timer->active);
+ int mv,percent;assert(battery_read(&mv,&percent)==ESP_OK && mv==4000 && percent==88);
+ advance_to(20999999);assert(!gpio_level);
+ advance_to(21000000);assert(gpio_level && rising_edges==1);
+ battery_keep_alive_pulse(NULL);assert(rising_edges==1);
+ advance_to(21199999);assert(gpio_level);
+ advance_to(21200000);assert(!gpio_level);
+ // Overdue periodic callbacks do not become a burst of button presses.
+ clock_us=61000000;advance_to(clock_us);assert(gpio_level && rising_edges==2);
+ advance_to(61200000);assert(!gpio_level);
+ assert(sample(1200)==ESP_ERR_NOT_FINISHED && battery_keep_alive_enabled);
+ assert(sample(1200)==ESP_OK && battery_charger_connected && !battery_keep_alive_enabled);
+ unsigned edges=rising_edges;advance_to(clock_us+120000000);assert(rising_edges==edges && !gpio_level);
+ // VIN in the hysteresis band does not change the confirmed state.
+ assert(sample(600)==ESP_OK && !battery_keep_alive_enabled);
+ assert(sample(0)==ESP_OK && !battery_keep_alive_enabled);
+ assert(sample(0)==ESP_OK && battery_keep_alive_enabled);
+ uint64_t deadline=battery_keep_alive_timer->alarm;unsigned starts=periodic_starts;
+ for(int i=0;i<10;i++){advance_to(clock_us+1000000);assert(sample(0)==ESP_OK);}
+ assert(battery_keep_alive_timer->alarm==deadline && periodic_starts==starts);
+ advance_to(deadline-1000000);assert(sample(1200)==ESP_OK);
+ advance_to(deadline);assert(gpio_level);
+ assert(sample(1200)==ESP_OK && !gpio_level && !battery_keep_alive_timer->active);
+ assert(battery_keep_alive_release_timer->active);advance_to(clock_us+200000);assert(!gpio_level);
+ // ADC errors resume keep-alive; recovery needs two fresh connected samples.
+ adc_failure=true;assert(sample(1200)==ESP_FAIL && battery_keep_alive_enabled);
+ deadline=battery_keep_alive_timer->alarm;assert(sample(1200)==ESP_FAIL && battery_keep_alive_timer->alarm==deadline);
+ adc_failure=false;assert(sample(1200)==ESP_OK && battery_keep_alive_enabled);
+ assert(sample(1200)==ESP_OK && !battery_keep_alive_enabled);
+ // A charger update between arming release and asserting GPIO must win.
+ disconnect_charger();assert(sample(1200)==ESP_OK);arm_hook=connect_during_arm;
+ edges=rising_edges;advance_to(battery_keep_alive_timer->alarm);
+ assert(!gpio_level && !battery_keep_alive_enabled && rising_edges==edges);
+ advance_to(clock_us+200000);assert(!gpio_level);
+ // Failed release scheduling never asserts KEY; the next period retries.
+ disconnect_charger();fail_release=true;edges=rising_edges;
+ advance_to(battery_keep_alive_timer->alarm);assert(!gpio_level && rising_edges==edges);
+ advance_to(battery_keep_alive_timer->alarm);assert(gpio_level && rising_edges==edges+1);
+ advance_to(clock_us+200000);assert(!gpio_level);
+ // A failed periodic start remains LOW and is retried on the next state update.
+ assert(battery_keep_alive_set_enabled(false)==ESP_OK);fail_periodic=true;
+ assert(sample(0)==ESP_FAIL && !gpio_level && !battery_keep_alive_enabled);
+ assert(sample(0)==ESP_OK && battery_keep_alive_enabled && battery_keep_alive_timer->active);
+ assert(!critical_depth);
+ puts("PASS: battery KEY timing, charger debounce/errors, callback race, overlap and timer failures");
+}
+"""
+    run('battery_keep_alive', pin + '\n' + mock + battery + checks)
+
+
 if __name__ == '__main__':
     schedule_tests()
     display_tests()
@@ -462,3 +674,4 @@ if __name__ == '__main__':
     stock_tests()
     dashboard_tests()
     bsec_input_tests()
+    battery_keep_alive_tests()

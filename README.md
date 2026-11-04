@@ -71,7 +71,7 @@ The project follows a modular component-based architecture:
   - `wifi_connect`: Robust Wi-Fi state machine.
   - `device_server`: Authenticated local HTTP server for OTA uploads and device status.
   - `time_manager`: SNTP synchronization and timezone conversion.
-  - `battery`: ADC battery/charger sensing, charge estimates and persistent runtime counters.
+  - `battery`: ADC battery/charger sensing, shield keep-alive, charge estimates and persistent runtime counters.
   - `display`: LCD, touch input, backlight and LVGL task integration.
   - `bsp`: Shared peripheral buses and board pin definitions.
 
@@ -232,12 +232,23 @@ Pin mappings are defined in `components/bsp/include/bsp.h`. standard configurati
 - **I2C SCL:** GPIO 22
 - **Battery sense:** GPIO 34 (ADC1 channel 6, `BSP_BAT_SENSE`), white wire from the divider midpoint.
 - **Charger sense:** GPIO 35 (ADC1 channel 7, `BSP_CHARGER_SENSE`), from the charger VIN divider midpoint.
+- **Shield keep-alive:** GPIO 33 (`BSP_BAT_KEEP_ALIVE`), through 10 kOhm to the 2N3904 base.
 
 ### Battery Runtime and Charger Sense
 
 The battery voltage divider uses 100 kΩ from battery BAT+ to GPIO 34 and 100 kΩ from GPIO 34 to GND, with a 100 nF capacitor from GPIO 34 to GND. The charger detector uses the external charger VIN: connect VIN through 100 kΩ to GPIO 35, then connect 33 kΩ and 100 nF from GPIO 35 to common GND. Share GND between the charger, shield, and ESP32. Never connect charger VIN directly to an ESP32 GPIO.
 
 The firmware samples charger presence once per second and requires two consecutive readings beyond its 0.8 V connected / 0.4 V disconnected thresholds. The current and previous battery-run counters are displayed as `HH:MM:SS`; NVS stores them once per minute and on charger-state changes. While charging, the raw-voltage label shows `Charging`; the percentage remains voltage-based.
+
+### Battery Shield Keep-Alive
+
+Connect GPIO33 through 10 kOhm to the 2N3904 base, with 100 kOhm between base and emitter. Connect the emitter to shared shield output GND and the collector to shield KEY (TP5602B pin 17), in parallel with the existing button. Verify the actual transistor pinout; do not connect KEY directly to the ESP32.
+
+GPIO33 starts LOW, then goes HIGH for 200 ms every 20 seconds on battery power. HIGH pulls KEY LOW through the transistor. Two `esp_timer` instances use the existing timer task and allow automatic light sleep between pulse edges; they do not reset display inactivity or change brightness. The first pulse occurs 20 seconds after initialization or re-enabling.
+
+Confirmed charger presence stops pulses and immediately releases KEY, including when the battery is full. Charger disconnection resumes pulses after the existing two-sample debounce. An ADC error resumes pulses conservatively; two fresh connected readings are needed to stop them again. Charger VIN indicates external power presence, not charging current.
+
+The 200 ms/20-second timing needs physical validation on this shield. Keep HOLD mode available for recovery: verify GPIO33 and KEY with a scope first, then test NORMAL mode for at least an hour, including idle operation, Wi-Fi activity, charger insertion/removal, and reboot. HOLD mode continues to draw its resistor load until switched to NORMAL; runtime gains have not been measured. A firmware stall while HIGH can hold KEY longer than intended.
 
 ### Environmental Heat Compensation
 
@@ -254,7 +265,7 @@ The display remains on. The clock uses `HH:MM` and the date uses `DD/MM/YY`; clo
 
 After 60 seconds without touch, the backlight is capped at 20% (or the user-selected value if lower), LVGL refresh, touch and animation periods change from 33 ms to 1000 ms, and the display releases its no-light-sleep lock. ESP-IDF uses frequency scaling from 10 to 80 MHz and tickless idle to sleep between work. Idle LVGL work is grouped into approximately one pass per second; GPIO27 interrupts that wait immediately. Touch on GPIO27 wakes the ESP32, restores the 33 ms periods and selected brightness, and blocks light sleep for the next active interval. Data updates do not reset the touch-idle timeout.
 
-Backlight PWM uses the sleep-compatible RC_FAST clock with LEDC keep-alive. GPIO27 uses low-level wake and an interrupt masked until touch release; held presses continue through the existing LVGL input timer. LVGL time comes directly from `esp_timer`, with no recurring 2 ms tick timer.
+Backlight PWM runs at 25 kHz with 8-bit resolution to move its switching above the audible range, using the sleep-compatible RC_FAST clock with LEDC keep-alive. The 100% setting drives the backlight continuously on. GPIO27 uses low-level wake and an interrupt masked until touch release; held presses continue through the existing LVGL input timer. LVGL time comes directly from `esp_timer`, with no recurring 2 ms tick timer.
 
 Wi-Fi sync runs once immediately after boot, including stocks even when the market is closed. With valid time, automatic stock refreshes run Monday through Friday on five-minute boundaries from 09:30 through 16:00 New York time, including a final 16:00 request. New York EST/EDT is calculated directly from UTC using US DST rules, independently of the configured display timezone. Holidays and early closes are intentionally ignored. Weather and NTP run on hourly `:00` boundaries and share the stock window when due together; outside market hours the automatic windows are hourly. If time is unavailable, NTP recovery windows remain five minutes apart and HTTPS waits for valid time. Explicit manual requests run immediately, including stock refreshes outside market hours. Failed stock work waits for an eligible market window or another manual request; weather/NTP failures join existing windows without adding radio wakeups. Startup keeps Wi-Fi available for 60 seconds, and the network settings tab, scans, or OTA uploads keep it on while active. Stock, weather, and NTP work runs sequentially in one task so TLS handshakes do not overlap.
 
@@ -262,7 +273,7 @@ Ticker-symbol labels on the dashboard and expanded panels use `2ECC71` while the
 
 Both Finnhub quotes are fetched consecutively without the old two-second pause. They share one certificate-verified HTTPS client, reusing its connection when the server permits persistence; a failed reused transport gets one fresh-connection retry. HTTP errors such as 429 are not immediately retried. The client is always destroyed before weather starts, releasing its TLS memory. BME680/BSEC remains in LP mode with approximately three-second sampling.
 
-Run `python tools/test_power_efficiency.py` with host GCC on PATH after an ESP-IDF build (or with `IDF_PATH` set). It compiles current production C functions with mocked RTOS, LVGL and HTTP APIs; checks cover US DST, scheduling/retries, idle wake timing, HTTP cleanup and quote parsing. Generated harnesses are kept in `build/power-efficiency-tests/`. These host checks do not establish physical touch latency, server connection reuse or battery runtime.
+Run `python tools/test_power_efficiency.py` with host GCC on PATH after an ESP-IDF build (or with `IDF_PATH` set). It compiles current production C functions with mocked RTOS, LVGL and HTTP APIs; checks cover US DST, scheduling/retries, idle wake timing, HTTP cleanup, quote parsing, dashboard formatting, BSEC inputs and shield KEY timing/charger transitions. Generated harnesses are kept in `build/power-efficiency-tests/`. These host checks do not establish physical touch latency, server connection reuse, shield button recognition or battery runtime.
 
 ESP-IDF 5.4 builds currently rely on the local PWM/light-sleep SDK fix: `s_sleep_sub_mode_ref_cnt` in `components/esp_hw_support/sleep_modes.c` must use `RTC_SLOW_ATTR` rather than `RTC_FAST_ATTR`. This SDK change is outside this repository; retain it when reproducing this build to avoid the known idle backlight flicker.
 

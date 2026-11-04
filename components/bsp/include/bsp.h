@@ -31,6 +31,7 @@
 #define BSP_BUTTON_BOOT_IO (GPIO_NUM_0)
 #define BSP_BAT_SENSE (GPIO_NUM_34) // White wire from battery divider; ADC1 channel 6.
 #define BSP_CHARGER_SENSE (GPIO_NUM_35) // Charger VIN divider; ADC1 channel 7.
+#define BSP_BAT_KEEP_ALIVE (GPIO_NUM_33) // 10k to 2N3904 base; HIGH pulls shield KEY LOW.
 
 // I2C Configuration
 // BME680 power: VCC -> 3V3 (red), GND -> GND (black).

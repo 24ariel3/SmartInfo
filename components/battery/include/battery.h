@@ -6,7 +6,8 @@
 #include "esp_err.h"
 
 /**
- * Initialize battery sensing on the BSP_BAT_SENSE pin defined in bsp.h.
+ * Initialize battery/charger sensing and shield KEY keep-alive on BSP pins.
+ * GPIO33 defaults LOW, then pulses for 200 ms every 20 seconds.
  * See src/battery.c for the divider/capacitor diagram and shield/GND tap notes.
  */
 esp_err_t battery_init(void);
@@ -15,7 +16,8 @@ esp_err_t battery_init(void);
 esp_err_t battery_read(int *voltage_mv, int *percent);
 
 /**
- * Update charger detection/runtime state and return the latest counters.
+ * Update charger detection/runtime state, gate KEY pulses on charger presence,
+ * and return the latest counters. Call once per second from one task.
  * Returns ESP_ERR_NOT_FINISHED until charger presence is debounced; outputs
  * still contain the current in-memory counters while detection is pending.
  */

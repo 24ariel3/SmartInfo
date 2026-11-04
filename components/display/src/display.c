@@ -52,8 +52,8 @@ static esp_pm_lock_handle_t s_display_awake_lock;
 #define LCD_BACKLIGHT_LEDC_TIMER LEDC_TIMER_0
 #define LCD_BACKLIGHT_LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LCD_BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_0
-#define LCD_BACKLIGHT_LEDC_RES LEDC_TIMER_10_BIT
-#define LCD_BACKLIGHT_LEDC_FREQ 5000 // 5kHz
+#define LCD_BACKLIGHT_LEDC_RES LEDC_TIMER_8_BIT
+#define LCD_BACKLIGHT_LEDC_FREQ 25000 // Above audible range; 8-bit resolution fits RC_FAST.
 #endif
 
 // LVGL Mutex
@@ -138,7 +138,7 @@ static void apply_brightness(bool idle) {
     percent = DISPLAY_IDLE_BRIGHTNESS_MAX;
   if (s_applied_brightness == percent) return;
 
-  uint32_t duty = (1023 * percent) / 100;
+  uint32_t duty = ((1U << LCD_BACKLIGHT_LEDC_RES) * percent) / 100;
   ledc_set_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL, duty);
   ledc_update_duty(LCD_BACKLIGHT_LEDC_MODE, LCD_BACKLIGHT_LEDC_CHANNEL);
   s_applied_brightness = percent;

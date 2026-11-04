@@ -5,11 +5,13 @@
 #include <stdint.h>
 
 #include "bsp.h"
+#include "driver/gpio.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "nvs.h"
 
 /*
@@ -41,6 +43,11 @@
  *                                                      +-- 33 kOhm -- GND
  *                                                      +-- 100 nF --- GND
  * Use the shared ESP32/shield/charger GND. GPIO35 sees about 1.24 V at 5 V VIN.
+ * Shield keep-alive: GPIO33 -- 10 kOhm -- 2N3904 base; base -- 100 kOhm -- GND.
+ * Q1 collector -> shield KEY (TP5602B pin 17); emitter -> shared output GND.
+ * Keep the manual button connected. HIGH presses KEY; LOW releases it.
+ * Use NORMAL mode after validating pulses; HOLD still dissipates its dummy load.
+ *
  * The ADC filter capacitor follows Espressif's hardware guidelines:
  * https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32/schematic-checklist.html#adc
  *
@@ -63,6 +70,8 @@ static adc_cali_handle_t battery_calibration;
 #define BATTERY_RUNTIME_NVS_NAMESPACE "battery"
 #define BATTERY_RUNTIME_NVS_KEY "runtime"
 #define BATTERY_RUNTIME_VERSION 1
+#define BATTERY_KEEP_ALIVE_INTERVAL_US (20ULL * 1000000)
+#define BATTERY_KEEP_ALIVE_PULSE_US (200ULL * 1000)
 
 typedef struct {
   uint32_t version;
@@ -86,6 +95,105 @@ static bool battery_charger_state_known;
 static bool battery_charger_candidate;
 static unsigned battery_charger_candidate_count;
 static bool battery_charger_adc_error_logged;
+static esp_timer_handle_t battery_keep_alive_timer;
+static esp_timer_handle_t battery_keep_alive_release_timer;
+static portMUX_TYPE battery_keep_alive_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool battery_keep_alive_enabled;
+
+static void battery_keep_alive_release(void *arg) {
+  (void)arg;
+  portENTER_CRITICAL(&battery_keep_alive_lock);
+  gpio_set_level(BSP_BAT_KEEP_ALIVE, 0);
+  portEXIT_CRITICAL(&battery_keep_alive_lock);
+}
+
+static void battery_keep_alive_pulse(void *arg) {
+  (void)arg;
+  portENTER_CRITICAL(&battery_keep_alive_lock);
+  bool enabled = battery_keep_alive_enabled;
+  portEXIT_CRITICAL(&battery_keep_alive_lock);
+  if (!enabled || esp_timer_is_active(battery_keep_alive_release_timer)) return;
+
+  // Arm release before pressing KEY so a timer failure cannot leave it held.
+  esp_err_t err = esp_timer_start_once(battery_keep_alive_release_timer,
+                                       BATTERY_KEEP_ALIVE_PULSE_US);
+  if (err != ESP_OK) {
+    battery_keep_alive_release(NULL);
+    ESP_LOGE(TAG, "Could not schedule KEY release: %s", esp_err_to_name(err));
+    return;
+  }
+
+  portENTER_CRITICAL(&battery_keep_alive_lock);
+  if (battery_keep_alive_enabled) gpio_set_level(BSP_BAT_KEEP_ALIVE, 1);
+  portEXIT_CRITICAL(&battery_keep_alive_lock);
+}
+
+static esp_err_t battery_keep_alive_set_enabled(bool enabled) {
+  portENTER_CRITICAL(&battery_keep_alive_lock);
+  bool changed = battery_keep_alive_enabled != enabled;
+  battery_keep_alive_enabled = enabled;
+  if (!enabled) gpio_set_level(BSP_BAT_KEEP_ALIVE, 0);
+  portEXIT_CRITICAL(&battery_keep_alive_lock);
+  if (!changed) return ESP_OK;
+
+  esp_err_t err = enabled
+      ? esp_timer_start_periodic(battery_keep_alive_timer,
+                                 BATTERY_KEEP_ALIVE_INTERVAL_US)
+      : esp_timer_stop(battery_keep_alive_timer);
+  if (!enabled && err == ESP_ERR_INVALID_STATE) return ESP_OK;
+  if (err != ESP_OK) {
+    portENTER_CRITICAL(&battery_keep_alive_lock);
+    battery_keep_alive_enabled = false;
+    gpio_set_level(BSP_BAT_KEEP_ALIVE, 0);
+    portEXIT_CRITICAL(&battery_keep_alive_lock);
+  }
+  return err;
+}
+
+static esp_err_t battery_keep_alive_init(void) {
+  esp_err_t err = gpio_set_level(BSP_BAT_KEEP_ALIVE, 0);
+  if (err != ESP_OK) return err;
+  const gpio_config_t config = {
+      .pin_bit_mask = 1ULL << BSP_BAT_KEEP_ALIVE,
+      .mode = GPIO_MODE_OUTPUT,
+      .pull_up_en = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_DISABLE,
+  };
+  err = gpio_config(&config);
+  if (err != ESP_OK) return err;
+  err = gpio_sleep_sel_dis(BSP_BAT_KEEP_ALIVE);
+  if (err != ESP_OK) return err;
+
+  const esp_timer_create_args_t release_args = {
+      .callback = battery_keep_alive_release,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "battery_key_release",
+  };
+  const esp_timer_create_args_t pulse_args = {
+      .callback = battery_keep_alive_pulse,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "battery_key_pulse",
+  };
+  err = esp_timer_create(&release_args, &battery_keep_alive_release_timer);
+  if (err != ESP_OK) goto fail;
+  err = esp_timer_create(&pulse_args, &battery_keep_alive_timer);
+  if (err != ESP_OK) goto fail;
+  // shortcut: 200 ms every 20 s needs NORMAL-mode validation on this shield; retune if presses are missed.
+  err = battery_keep_alive_set_enabled(true);
+  if (err == ESP_OK) return ESP_OK;
+
+fail:
+  if (battery_keep_alive_timer) {
+    esp_timer_delete(battery_keep_alive_timer);
+    battery_keep_alive_timer = NULL;
+  }
+  if (battery_keep_alive_release_timer) {
+    esp_timer_delete(battery_keep_alive_release_timer);
+    battery_keep_alive_release_timer = NULL;
+  }
+  return err;
+}
 
 // shortcut: estimated discharge curve; calibrate with this device's load and battery temperature for accuracy.
 // The table's "<1%" point at 3050 mV is represented by its midpoint, 0.5%.
@@ -325,14 +433,29 @@ esp_err_t battery_runtime_update(uint64_t *current_seconds,
     }
   }
 
+  esp_err_t keep_alive_err = ESP_OK;
+  if (read_err != ESP_OK ||
+      battery_charger_candidate_count >= BATTERY_CHARGER_DEBOUNCE_SAMPLES) {
+    keep_alive_err = battery_keep_alive_set_enabled(
+        read_err != ESP_OK || !battery_charger_connected);
+    if (keep_alive_err != ESP_OK) {
+      ESP_LOGE(TAG, "Could not update shield keep-alive: %s",
+               esp_err_to_name(keep_alive_err));
+    }
+  }
+
   battery_runtime_save(force_save);
   battery_runtime_set_outputs(current_seconds, previous_seconds,
                               charger_connected);
   if (read_err != ESP_OK) return read_err;
+  if (keep_alive_err != ESP_OK) return keep_alive_err;
   return battery_charger_state_known ? ESP_OK : ESP_ERR_NOT_FINISHED;
 }
 
 esp_err_t battery_init(void) {
+  esp_err_t err = battery_keep_alive_init();
+  if (err != ESP_OK) return err;
+
   // shortcut: the always-on 100k/100k divider can back-power an unpowered ESP32; switch it if full-off isolation is needed.
   adc_unit_t adc_unit;
   ESP_ERROR_CHECK(adc_oneshot_io_to_channel(BSP_BAT_SENSE, &adc_unit, &battery_channel));
@@ -364,7 +487,7 @@ esp_err_t battery_init(void) {
   battery_last_runtime_update_us = esp_timer_get_time();
 
   int battery_mv, percent;
-  esp_err_t err = battery_read(&battery_mv, &percent);
+  err = battery_read(&battery_mv, &percent);
   if (err == ESP_OK) {
     ESP_LOGI(TAG, "Battery: %d mV (~%d%%)", battery_mv, percent);
   } else {
