@@ -12,7 +12,12 @@
  */
 esp_err_t battery_init(void);
 
-/** Read cell voltage in mV and approximate charge using the battery voltage LUT. */
+/**
+ * Return latest calibrated, burst-averaged cell mV and filtered usable-energy %.
+ * Percentage uses a five-sample median and EMA before the reference LUT.
+ * Read sequentially: once at initialization, then normally every 10 seconds.
+ * Filter state is RAM-only; both caller outputs remain unchanged on failure.
+ */
 esp_err_t battery_read(int *voltage_mv, int *percent);
 
 /**

@@ -23,7 +23,7 @@ static const char *TAG = "BSEC";
 #define BSEC_STATE_SAVE_INTERVAL_NS (60LL * 60 * 1000 * 1000 * 1000)
 
 // Additional enclosure heating beyond BSEC's sensor-heater compensation.
-#define BSEC_HEAT_SOURCE_OFFSET_C 3.5f
+#define BSEC_HEAT_SOURCE_OFFSET_C 1.5f
 
 #define BSEC_NVS_NAMESPACE "bsec_storage"
 #define BSEC_NVS_KEY_STATE "state"

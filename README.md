@@ -161,7 +161,15 @@ Use 1% divider resistors and 100 nF ceramic capacitors near the ADC connections.
 
 Battery voltage is sampled every ten seconds using GPIO34. Each sample averages 32 back-to-back ADC conversions, applies ADC calibration and scales the divider voltage by two.
 
-A piecewise-linear lookup table estimates remaining charge from voltage and rounds to the nearest integer. The current curve clamps to 0% at or below 3,000 mV and 100% at or above 4,150 mV. This is a load-dependent estimate, not a direct measurement of remaining capacity. Settings show percentage and millivolts; the status bar shows the percentage number without a `%` symbol. The [plotting tool](#hardware-design-files-and-tools) visualizes the programmed curve.
+Percentage estimates **usable energy remaining above a nominal 3.0 V cutoff**. Its reference is the [University of Bayreuth NCR18650B dataset](https://zenodo.org/records/8369275): the median of 92 discharge curves at 0.05C (approximately 160-170 mA per cell) and 25°C. Trapezoidal integration of voltage against SOC gives energy; the cumulative energy at 3.0 V is subtracted, then the remainder is normalized at the full-SOC endpoint. The median curve crosses 3.0 V at about 1.692% raw SOC and reaches about 4.1771 V at full SOC. No assumed internal-resistance correction is applied.
+
+For reproducibility, the source files are `pocv_dc.csv` (MD5 `485ea0795d373c2ec19bca93643130bb`) and `pocv_soc.csv` (MD5 `02e4d69ca3600f3f72a3c1ff86203ba4`). The voltage CSV contains 5,000 SOC rows and 92 cell columns. The derived firmware table has 25 points at 50 mV intervals from 3,000 to 4,200 mV, stored in tenths of a percent. Integer interpolation rounds once to the final percentage, with clamps at 0% and 100%. Rounding can display 0% above 3.0 V or 100% below 4.2 V. This is a provisional reference rather than a calibration of this device's load; temperature, ageing, charging and converter losses affect accuracy. Energy percentage does not guarantee the same percentage of future runtime.
+
+Before the LUT, a rolling median of five successful battery samples rejects isolated disturbances, followed by exponential smoothing that moves one quarter toward the median each update. The first successful reading seeds the filter; startup uses available samples. Sustained changes typically settle over one to two minutes, with about 150 seconds allowed for a 100 mV step to settle within 5 mV. Errors leave filter state unchanged; reboot starts fresh. Charger detection and shield KEY control use their independent, unfiltered path.
+
+Settings retain the latest raw millivolts alongside the filtered energy percentage; the status bar shows that same percentage without a `%` symbol. The raw value can still fluctuate. The [plotting tool](#hardware-design-files-and-tools) reads the firmware table directly and shows its voltage-to-percentage mapping before temporal filtering.
+
+Each successful battery read has a `BATTERY` debug record with monotonic time, raw/median/filtered mV, percentage and confirmed charger state (or `unknown` at startup). Normal builds remain at INFO. To capture these records, set maximum and default log verbosity to Debug in `idf.py menuconfig` for a diagnostic build; runtime tag selection alone cannot restore compiled-out messages. Restore INFO for normal operation and endurance measurements.
 
 ### Charger Presence and Runtime Counters
 
@@ -300,12 +308,16 @@ Keep it in local `sdkconfig`; an empty or invalid token disables the server. The
 
 ### Environmental Heat Compensation
 
-The BSEC integration supplies a fixed `+3.5` degrees Celsius enclosure heat-source
+The BSEC integration supplies a fixed `+1.5` degrees Celsius enclosure heat-source
 offset. BSEC uses it to reduce compensated temperature and recalculate compensated
 relative humidity; raw sensor readings remain unchanged. This adds to BSEC's own
 sensor-heater compensation, rather than changing the display values directly.
 See [BME680 component calibration](components/bsec_bme680/README.md#enclosure-heat-compensation)
 for the constant to adjust and reference-measurement guidance.
+
+The offset was reduced from +3.5 to +1.5 degrees Celsius after switching from HOLD
+to NORMAL mode with GPIO33 keep-alive. This avoids the continuous 62-ohm HOLD
+resistor load, removing a heat source inside the enclosure.
 
 The LCD uses the compensated temperature and humidity. Recheck this fixed offset after changes to enclosure heat or the power arrangement.
 
@@ -460,6 +472,6 @@ After changing the shield or pulse timing, verify GPIO33/KEY and test NORMAL mod
   python tools/plot_battery_soc_lut.py
   ```
 
-  The image is written to `build/battery_soc_lut.png`. The script keeps its own LUT; update it alongside the firmware LUT when changing the battery curve. This is an estimated charge curve, not a measured discharge test.
+  The image is written to `build/battery_soc_lut.png`. The script reads the LUT and range constants from the firmware source. This plots the programmed usable-energy estimate, not a measured device discharge test.
 
 See [Testing and Troubleshooting](#testing-and-troubleshooting) for regression checks. Temporary SolidWorks lock files (`~$*`) and CAD/PCB editor backups are local artifacts and should not be committed.

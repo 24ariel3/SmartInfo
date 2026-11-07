@@ -1,6 +1,7 @@
 #include "battery.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -195,38 +196,68 @@ fail:
   return err;
 }
 
-// shortcut: estimated discharge curve; calibrate with this device's load and battery temperature for accuracy.
-// The table's "<1%" point at 3050 mV is represented by its midpoint, 0.5%.
-static const struct {
-  int millivolts;
-  float percent;
-} battery_soc_lut[] = {
-    {3000, 0.0f},  {3050, 0.5f},  {3100, 1.0f},  {3150, 1.5f},  {3200, 2.0f},
-    {3250, 4.0f},  {3300, 9.0f},  {3350, 13.0f}, {3400, 17.0f}, {3450, 21.0f},
-    {3500, 27.0f}, {3550, 35.0f}, {3600, 44.0f}, {3650, 52.0f}, {3700, 57.0f},
-    {3750, 62.0f}, {3800, 67.0f}, {3850, 73.0f}, {3900, 79.0f}, {3950, 84.0f},
-    {4000, 88.0f}, {4050, 92.0f}, {4100, 97.0f}, {4150, 100.0f},
+#define BATT_LUT_MIN_MV 3000
+#define BATT_LUT_MAX_MV 4200
+#define BATT_LUT_STEP_MV 50
+#define BATTERY_FILTER_SAMPLES 5
+
+// Bayreuth NCR18650B, https://doi.org/10.5281/zenodo.8369275; derivation in README.
+// Median of 92 discharge curves at 0.05C/25 C, integrated above 3.0 V; units 0.1%.
+// shortcut: reference curve is not load-calibrated; validate against device discharge measurements.
+static const uint16_t battery_soc_lut_permille[] = {
+    0,   3,   8,   13,  19,  33,  66,  105, 135,
+    173, 223, 300, 390, 469, 523, 565, 619, 681,
+    746, 802, 851, 901, 962, 995, 1000,
 };
+_Static_assert(sizeof(battery_soc_lut_permille) /
+                       sizeof(battery_soc_lut_permille[0]) ==
+                   (BATT_LUT_MAX_MV - BATT_LUT_MIN_MV) / BATT_LUT_STEP_MV + 1,
+               "Battery LUT length must match its voltage range and step");
+
+static int battery_voltage_history[BATTERY_FILTER_SAMPLES];
+static unsigned battery_voltage_count;
+static unsigned battery_voltage_next;
+static int32_t battery_filtered_q8;
 
 static int battery_voltage_to_percent(int battery_mv) {
-  if (battery_mv <= battery_soc_lut[0].millivolts) {
-    return (int)(battery_soc_lut[0].percent + 0.5f);
-  }
+  if (battery_mv <= BATT_LUT_MIN_MV) return 0;
+  if (battery_mv >= BATT_LUT_MAX_MV) return 100;
 
-  for (size_t i = 1; i < sizeof(battery_soc_lut) / sizeof(battery_soc_lut[0]); ++i) {
-    if (battery_mv <= battery_soc_lut[i].millivolts) {
-      const int mv_range = battery_soc_lut[i].millivolts - battery_soc_lut[i - 1].millivolts;
-      const float fraction =
-          (float)(battery_mv - battery_soc_lut[i - 1].millivolts) / mv_range;
-      const float percent = battery_soc_lut[i - 1].percent +
-                            fraction * (battery_soc_lut[i].percent -
-                                        battery_soc_lut[i - 1].percent);
-      return (int)(percent + 0.5f);
+  const int offset_mv = battery_mv - BATT_LUT_MIN_MV;
+  const int idx = offset_mv / BATT_LUT_STEP_MV;
+  const int rem_mv = offset_mv % BATT_LUT_STEP_MV;
+  const int p0 = battery_soc_lut_permille[idx];
+  const int p1 = battery_soc_lut_permille[idx + 1];
+  const int numerator = p0 * BATT_LUT_STEP_MV + rem_mv * (p1 - p0);
+  // Round only the final percentage to avoid rounding twice near half-percent values.
+  return (numerator + 5 * BATT_LUT_STEP_MV) / (10 * BATT_LUT_STEP_MV);
+}
+
+static int battery_filter_voltage_mv(int raw_mv, int *median_mv) {
+  battery_voltage_history[battery_voltage_next] = raw_mv;
+  battery_voltage_next = (battery_voltage_next + 1) % BATTERY_FILTER_SAMPLES;
+  if (battery_voltage_count < BATTERY_FILTER_SAMPLES) ++battery_voltage_count;
+
+  int sorted[BATTERY_FILTER_SAMPLES];
+  for (unsigned i = 0; i < battery_voltage_count; ++i) {
+    int value = battery_voltage_history[i];
+    unsigned j = i;
+    while (j > 0 && sorted[j - 1] > value) {
+      sorted[j] = sorted[j - 1];
+      --j;
     }
+    sorted[j] = value;
   }
-
-  const size_t last = sizeof(battery_soc_lut) / sizeof(battery_soc_lut[0]) - 1;
-  return (int)(battery_soc_lut[last].percent + 0.5f);
+  unsigned middle = battery_voltage_count / 2;
+  *median_mv = battery_voltage_count % 2
+                   ? sorted[middle]
+                   : (sorted[middle - 1] + sorted[middle] + 1) / 2;
+  if (battery_voltage_count == 1) {
+    battery_filtered_q8 = *median_mv * 256;
+  } else {
+    battery_filtered_q8 += (*median_mv * 256 - battery_filtered_q8) / 4;
+  }
+  return (battery_filtered_q8 + 128) / 256;
 }
 
 static esp_err_t battery_adc_read_pin_mv(adc_channel_t channel, int *pin_mv) {
@@ -250,9 +281,17 @@ esp_err_t battery_read(int *voltage_mv, int *percent) {
   if (err != ESP_OK) return err;
 
   int battery_mv = pin_mv * 2;
+  int median_mv;
+  int filtered_mv = battery_filter_voltage_mv(battery_mv, &median_mv);
   *voltage_mv = battery_mv;
-  *percent = battery_voltage_to_percent(battery_mv);
+  *percent = battery_voltage_to_percent(filtered_mv);
   assert(*percent >= 0 && *percent <= 100);
+  ESP_LOGD(TAG, "Battery sample: t=%" PRId64 " us, raw=%d mV, median=%d mV, "
+                "filtered=%d mV, energy=%d%%, charger=%s",
+           esp_timer_get_time(), battery_mv, median_mv, filtered_mv, *percent,
+           battery_charger_state_known
+               ? (battery_charger_connected ? "connected" : "disconnected")
+               : "unknown");
   return ESP_OK;
 }
 

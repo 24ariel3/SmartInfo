@@ -30,7 +30,7 @@ Because the BSEC library is proprietary, you must download it from Bosch Sensort
 ## Enclosure Heat Compensation
 
 `BSEC_HEAT_SOURCE_OFFSET_C` in `src/bsec_integration.c` supplies an additional
-`+3.5` degrees Celsius to `BSEC_INPUT_HEATSOURCE` when BSEC requests that input.
+`+1.5` degrees Celsius to `BSEC_INPUT_HEATSOURCE` when BSEC requests that input.
 BSEC subtracts this value when calculating compensated temperature and uses the
 corrected temperature to calculate compensated relative humidity. Raw temperature
 and humidity inputs remain unchanged; no separate UI offset is applied.

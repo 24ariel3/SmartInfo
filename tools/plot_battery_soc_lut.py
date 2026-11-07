@@ -1,37 +1,42 @@
-"""Plot the battery voltage-to-SOC lookup used by components/battery/src/battery.c."""
+"""Plot the firmware's voltage-to-usable-energy LUT (before temporal filtering)."""
 
 from pathlib import Path
+import re
 
-import matplotlib.pyplot as plt
 
-
-# Keep these points in sync with battery_soc_lut in components/battery/src/battery.c.
-# The table's "<1%" point at 3050 mV is represented by its midpoint, 0.5%.
-BATTERY_SOC_LUT = [
-    (3000, 0.0), (3050, 0.5), (3100, 1.0), (3150, 1.5), (3200, 2.0),
-    (3250, 4.0), (3300, 9.0), (3350, 13.0), (3400, 17.0), (3450, 21.0),
-    (3500, 27.0), (3550, 35.0), (3600, 44.0), (3650, 52.0), (3700, 57.0),
-    (3750, 62.0), (3800, 67.0), (3850, 73.0), (3900, 79.0), (3950, 84.0),
-    (4000, 88.0), (4050, 92.0), (4100, 97.0), (4150, 100.0),
+ROOT = Path(__file__).resolve().parents[1]
+FIRMWARE = (ROOT / 'components/battery/src/battery.c').read_text(encoding='utf-8')
+LUT_MIN_MV, LUT_MAX_MV, LUT_STEP_MV = (
+    int(re.search(r'^#define BATT_LUT_' + name + r'_MV\s+(\d+)', FIRMWARE, re.M)[1])
+    for name in ('MIN', 'MAX', 'STEP')
+)
+LUT_PERMILLE = [
+    int(value.strip())
+    for value in re.search(
+        r'battery_soc_lut_permille\[\]\s*=\s*\{([^}]+)\}', FIRMWARE
+    )[1].split(',')
+    if value.strip()
 ]
+if (len(LUT_PERMILLE) != (LUT_MAX_MV - LUT_MIN_MV) // LUT_STEP_MV + 1
+        or LUT_PERMILLE[0] != 0 or LUT_PERMILLE[-1] != 1000
+        or any(low > high for low, high in zip(LUT_PERMILLE, LUT_PERMILLE[1:]))):
+    raise ValueError('Firmware battery LUT has invalid bounds, length or order')
 
 
 def voltage_to_percent(millivolts: int) -> int:
-    if millivolts <= BATTERY_SOC_LUT[0][0]:
-        return int(BATTERY_SOC_LUT[0][1] + 0.5)
-
-    for index in range(1, len(BATTERY_SOC_LUT)):
-        high_mv, high_percent = BATTERY_SOC_LUT[index]
-        if millivolts <= high_mv:
-            low_mv, low_percent = BATTERY_SOC_LUT[index - 1]
-            mv_range = high_mv - low_mv
-            percent = low_percent + (millivolts - low_mv) / mv_range * (high_percent - low_percent)
-            return int(percent + 0.5)
-
-    return int(BATTERY_SOC_LUT[-1][1] + 0.5)
+    if millivolts <= LUT_MIN_MV:
+        return 0
+    if millivolts >= LUT_MAX_MV:
+        return 100
+    index, remainder = divmod(millivolts - LUT_MIN_MV, LUT_STEP_MV)
+    low, high = LUT_PERMILLE[index:index + 2]
+    numerator = low * LUT_STEP_MV + remainder * (high - low)
+    return (numerator + 5 * LUT_STEP_MV) // (10 * LUT_STEP_MV)
 
 
 def main() -> None:
+    import matplotlib.pyplot as plt
+
     voltages_mv = range(2800, 4401)
     percents = [voltage_to_percent(mv) for mv in voltages_mv]
 
@@ -44,8 +49,8 @@ def main() -> None:
         label="Firmware output (rounded to integer)",
     )
     ax.scatter(
-        [mv / 1000 for mv, _ in BATTERY_SOC_LUT],
-        [percent for _, percent in BATTERY_SOC_LUT],
+        [mv / 1000 for mv in range(LUT_MIN_MV, LUT_MAX_MV + 1, LUT_STEP_MV)],
+        [value / 10 for value in LUT_PERMILLE],
         color="#e4572e",
         s=30,
         zorder=3,
@@ -61,16 +66,16 @@ def main() -> None:
         fontsize=9,
     )
     ax.annotate(
-        "100% at 4.2 V",
+        "Upper clamp at 4.2 V",
         (4.2, 100),
         xytext=(3.82, 86),
         arrowprops={"arrowstyle": "->", "color": "#555"},
         fontsize=9,
     )
     ax.set(
-        title="Battery voltage-to-SOC lookup",
+        title="Battery voltage-to-usable-energy lookup",
         xlabel="Battery voltage (V)",
-        ylabel="Reported charge (%)",
+        ylabel="Estimated usable energy remaining (%)",
     )
     ax.set_xlim(2.8, 4.4)
     ax.set_ylim(-3, 103)
@@ -81,14 +86,14 @@ def main() -> None:
     fig.text(
         0.5,
         0.01,
-        "This shows the programmed estimate; it is not a measured discharge curve.",
+        "Bayreuth NCR18650B, 0.05C / 25 C; provisional reference, not calibrated to this device.",
         ha="center",
         fontsize=9,
         color="#555",
     )
     fig.tight_layout(rect=(0, 0.04, 1, 1))
 
-    output_path = Path("build") / "battery_soc_lut.png"
+    output_path = ROOT / "build" / "battery_soc_lut.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     print(output_path)

@@ -5,6 +5,8 @@ Generated harnesses and executables live under build/power-efficiency-tests/.
 """
 from datetime import datetime, timezone
 from pathlib import Path
+from fractions import Fraction
+import runpy
 import re
 import json
 import os
@@ -467,7 +469,7 @@ static void check(uint32_t mask,int expected,bool heat_expected) {
  for(uint8_t i=0;i<count;i++) {
   assert(inputs[i].time_stamp==9876543210LL && inputs[i].signal_dimensions==1);
   switch(inputs[i].sensor_id) {
-   case BSEC_INPUT_HEATSOURCE:assert(inputs[i].signal==3.5f);heat_count++;break;
+   case BSEC_INPUT_HEATSOURCE:assert(inputs[i].signal==BSEC_HEAT_SOURCE_OFFSET_C);heat_count++;break;
    case BSEC_INPUT_TEMPERATURE:assert(inputs[i].signal==31.5f);break;
    case BSEC_INPUT_HUMIDITY:assert(inputs[i].signal==45.0f);break;
    case BSEC_INPUT_PRESSURE:assert(inputs[i].signal==101325.0f);break;
@@ -483,7 +485,7 @@ int main(void) {
  check(raw|heat,5,true);check(raw,4,false);
  check(BSEC_PROCESS_TEMPERATURE|BSEC_PROCESS_HUMIDITY|heat,3,true);
  check(heat,1,true);check(BSEC_PROCESS_TEMPERATURE,1,false);check(0,0,false);
- puts("PASS: BSEC +3.5 C heat input, requested-mask handling, raw values and scalar metadata");
+ puts("PASS: configured BSEC heat input, requested-mask handling, raw values and scalar metadata");
 }
 """
     run('bsec_inputs', offset + '\n' + harness,
@@ -573,18 +575,145 @@ typedef struct {int unit_id;} adc_oneshot_unit_init_cfg_t;
 typedef struct {int atten,bitwidth;} adc_oneshot_chan_cfg_t;
 typedef struct {int unit_id,atten,bitwidth,default_vref;} adc_cali_line_fitting_config_t;
 static int charger_mv;
-static bool adc_failure;
+static int battery_pin_mv=2000;
+static int battery_adc_fail_after=-1;
+static int last_adc_channel;
+static bool adc_failure,battery_calibration_failure;
 static esp_err_t adc_oneshot_io_to_channel(int pin,adc_unit_t *unit,adc_channel_t *channel){*unit=1;*channel=pin;return ESP_OK;}
 static esp_err_t adc_oneshot_new_unit(const adc_oneshot_unit_init_cfg_t *config,adc_oneshot_unit_handle_t *out){*out=(void *)1;return ESP_OK;}
 static esp_err_t adc_oneshot_config_channel(adc_oneshot_unit_handle_t adc,adc_channel_t channel,const adc_oneshot_chan_cfg_t *config){return ESP_OK;}
 static esp_err_t adc_cali_create_scheme_line_fitting(const adc_cali_line_fitting_config_t *config,adc_cali_handle_t *out){*out=(void *)1;return ESP_OK;}
-static esp_err_t adc_oneshot_read(adc_oneshot_unit_handle_t adc,adc_channel_t channel,int *raw){if(channel==35 && adc_failure)return ESP_FAIL;*raw=channel==35?charger_mv:2000;return ESP_OK;}
-static esp_err_t adc_cali_raw_to_voltage(adc_cali_handle_t cal,int raw,int *mv){*mv=raw;return ESP_OK;}
+static esp_err_t adc_oneshot_read(adc_oneshot_unit_handle_t adc,adc_channel_t channel,int *raw){
+ last_adc_channel=channel;
+ if(channel==35 && adc_failure)return ESP_FAIL;
+ if(channel==34){if(battery_adc_fail_after==0)return ESP_FAIL;if(battery_adc_fail_after>0)--battery_adc_fail_after;}
+ *raw=channel==35?charger_mv:battery_pin_mv;return ESP_OK;
+}
+static esp_err_t adc_cali_raw_to_voltage(adc_cali_handle_t cal,int raw,int *mv){
+ if(last_adc_channel==34 && battery_calibration_failure)return ESP_FAIL;
+ *mv=raw;return ESP_OK;
+}
 typedef int nvs_handle_t;
 static esp_err_t nvs_open(const char *name,int mode,nvs_handle_t *out){*out=1;return ESP_OK;}
 static esp_err_t nvs_get_blob(nvs_handle_t handle,const char *key,void *out,size_t *size){return ESP_ERR_NVS_NOT_FOUND;}
 static esp_err_t nvs_set_blob(nvs_handle_t handle,const char *key,const void *value,size_t size){return ESP_OK;}
 static esp_err_t nvs_commit(nvs_handle_t handle){return ESP_OK;}
+"""
+    plot = runpy.run_path(str(ROOT / 'tools/plot_battery_soc_lut.py'))
+    reference_lut = [0, 3, 8, 13, 19, 33, 66, 105, 135, 173, 223, 300, 390,
+                     469, 523, 565, 619, 681, 746, 802, 851, 901, 962, 995, 1000]
+    assert (plot['LUT_MIN_MV'], plot['LUT_MAX_MV'], plot['LUT_STEP_MV']) == (3000, 4200, 50)
+    assert plot['LUT_PERMILLE'] == reference_lut
+    expected = []
+    for mv in range(3000, 4201):
+        if mv == 4200:
+            value = 100
+        else:
+            index, remainder = divmod(mv - 3000, 50)
+            exact = (Fraction(reference_lut[index], 10)
+                     + Fraction(remainder, 50)
+                     * Fraction(reference_lut[index + 1] - reference_lut[index], 10))
+            value = int(exact + Fraction(1, 2))
+        assert plot['voltage_to_percent'](mv) == value
+        expected.append(value)
+    for mv, value in [(-1, 0), (2999, 0), (4201, 100), (6000, 100)]:
+        assert plot['voltage_to_percent'](mv) == value
+    gauge_checks = ('static const unsigned char expected_percent[] = {'
+                    + ','.join(map(str, expected)) + '};\n') + r"""
+static esp_err_t sample(int mv);
+static void reset_battery_filter(void) {
+ memset(battery_voltage_history,0,sizeof(battery_voltage_history));
+ battery_voltage_count=battery_voltage_next=0;battery_filtered_q8=0;
+}
+static int sample_battery(int battery_mv) {
+ assert(battery_mv%2==0);battery_pin_mv=battery_mv/2;
+ int mv=-1,percent=-1;
+ assert(battery_read(&mv,&percent)==ESP_OK && mv==battery_mv);
+ assert(percent>=0 && percent<=100);return percent;
+}
+static void settle_battery(int battery_mv) {
+ reset_battery_filter();for(int i=0;i<5;i++)sample_battery(battery_mv);
+}
+static void battery_gauge_tests(void) {
+ const uint16_t reference[]={0,3,8,13,19,33,66,105,135,173,223,300,390,
+                            469,523,565,619,681,746,802,851,901,962,995,1000};
+ assert(sizeof(reference)==sizeof(battery_soc_lut_permille));
+ assert(!memcmp(reference,battery_soc_lut_permille,sizeof(reference)));
+ for(size_t i=1;i<25;i++)assert(reference[i]>=reference[i-1]);
+ for(int mv=3000;mv<=4200;mv++)assert(battery_voltage_to_percent(mv)==expected_percent[mv-3000]);
+ assert(battery_voltage_to_percent(INT_MIN)==0 && battery_voltage_to_percent(INT_MAX)==100);
+ int last=-1;
+ for(int mv=0;mv<=6000;mv++){
+  int percent=battery_voltage_to_percent(mv);assert(percent>=last && percent>=0 && percent<=100);last=percent;
+ }
+ assert(battery_voltage_to_percent(3065)==0); // 0.45% must not round twice to 1%.
+ assert(battery_voltage_to_percent(4000)==85);
+ // Startup medians include even-count averages and sorting never reorders history.
+ reset_battery_filter();int middle;
+ assert(battery_filter_voltage_mv(4000,&middle)==4000 && middle==4000);
+ battery_filter_voltage_mv(4002,&middle);assert(middle==4001);
+ battery_filter_voltage_mv(3998,&middle);assert(middle==4000);
+ battery_filter_voltage_mv(4004,&middle);assert(middle==4001);
+ battery_filter_voltage_mv(3900,&middle);assert(middle==4000);
+ const int insertion_order[]={4000,4002,3998,4004,3900};
+ assert(!memcmp(insertion_order,battery_voltage_history,sizeof(insertion_order)));
+ battery_filter_voltage_mv(3980,&middle);assert(middle==3998 && battery_voltage_history[0]==3980);
+ // Stable inputs have no drift; after warmup one or two outliers are rejected.
+ settle_battery(4000);int32_t stable=battery_filtered_q8;
+ for(int i=0;i<50;i++)assert(sample_battery(4000)==85 && battery_filtered_q8==stable);
+ for(int i=0;i<5;i++){
+  int mv=i==0?3900:i==1?4100:4000;
+  assert(sample_battery(mv)==85 && battery_filtered_q8==stable);
+ }
+ // Voltage sequences corresponding to the reported old-percentage jitters.
+ const int jitter[][5]={{4070,4050,4090,4070,4070},{4000,3988,4026,3910,3988}};
+ for(size_t j=0;j<2;j++){
+  settle_battery(jitter[j][0]);int low=100,high=0,raw_low=100,raw_high=0;
+  for(int i=0;i<5;i++){
+   int percent=sample_battery(jitter[j][i]);if(percent<low)low=percent;if(percent>high)high=percent;
+   int raw_percent=battery_voltage_to_percent(jitter[j][i]);
+   if(raw_percent<raw_low)raw_low=raw_percent;
+   if(raw_percent>raw_high)raw_high=raw_percent;
+  }
+  assert(high-low<=2 && high-low<raw_high-raw_low);
+ }
+ // Sustained changes are followed in either direction within 150 seconds / 15 samples.
+ for(int direction=-1;direction<=1;direction+=2){
+  settle_battery(4000);int target=4000+direction*100;int previous=85;
+  for(int i=0;i<15;i++){
+   int percent=sample_battery(target);assert(direction<0?percent<=previous:percent>=previous);previous=percent;
+  }
+  int filtered=(battery_filtered_q8+128)/256;assert(abs(filtered-target)<=5);
+  assert(previous==battery_voltage_to_percent(target));
+ }
+ settle_battery(2800);assert(sample_battery(2800)==0);
+ settle_battery(4400);assert(sample_battery(4400)==100);
+ // Errors after partial ADC acquisition and during calibration preserve state/outputs.
+ settle_battery(4000);int history[BATTERY_FILTER_SAMPLES];memcpy(history,battery_voltage_history,sizeof(history));
+ unsigned count=battery_voltage_count,next=battery_voltage_next;int32_t q8=battery_filtered_q8;
+ battery_pin_mv=1950;
+ for(int failure=0;failure<4;failure++){
+  int mv=-123,percent=-456;esp_err_t err;
+  if(failure==0){battery_adc_fail_after=16;err=battery_read(&mv,&percent);battery_adc_fail_after=-1;assert(err==ESP_FAIL);}
+  else if(failure==1){battery_calibration_failure=true;err=battery_read(&mv,&percent);battery_calibration_failure=false;assert(err==ESP_FAIL);}
+  else if(failure==2){err=battery_read(NULL,&percent);assert(err==ESP_ERR_INVALID_ARG);}
+  else {adc_oneshot_unit_handle_t saved=battery_adc;battery_adc=NULL;err=battery_read(&mv,&percent);battery_adc=saved;assert(err==ESP_ERR_INVALID_STATE);}
+  assert(mv==-123 && percent==-456 && !memcmp(history,battery_voltage_history,sizeof(history)));
+  assert(battery_voltage_count==count && battery_voltage_next==next && battery_filtered_q8==q8);
+ }
+ assert(sample_battery(3900)==85); // First recovered sample is an isolated dip.
+ // Charger transitions do not reset the gauge, and gauge failures do not gate KEY.
+ q8=battery_filtered_q8;count=battery_voltage_count;next=battery_voltage_next;
+ int key_before=gpio_level;unsigned edges_before=rising_edges;
+ battery_adc_fail_after=0;
+ assert(sample(1200)==ESP_OK && sample(1200)==ESP_OK && battery_charger_connected);
+ assert(sample(0)==ESP_OK && sample(0)==ESP_OK && !battery_charger_connected);
+ assert(battery_filtered_q8==q8 && battery_voltage_count==count && battery_voltage_next==next);
+ battery_adc_fail_after=-1;
+ for(int i=0;i<15;i++)sample_battery(3900);
+ assert(gpio_level==key_before && rising_edges==edges_before);
+ puts("PASS: usable-energy LUT, exact rounding/plot parity, startup, median/EMA jitter/trends and error isolation");
+}
 """
     checks = r"""
 static void advance_to(int64_t target) {
@@ -618,7 +747,7 @@ int main(void) {
  create_calls=fail_create=0;
  assert(battery_init()==ESP_OK && !gpio_level && battery_keep_alive_enabled);
  assert(battery_keep_alive_timer->alarm==21000000 && !battery_keep_alive_release_timer->active);
- int mv,percent;assert(battery_read(&mv,&percent)==ESP_OK && mv==4000 && percent==88);
+ int mv,percent;assert(battery_read(&mv,&percent)==ESP_OK && mv==4000 && percent==85);
  advance_to(20999999);assert(!gpio_level);
  advance_to(21000000);assert(gpio_level && rising_edges==1);
  battery_keep_alive_pulse(NULL);assert(rising_edges==1);
@@ -661,10 +790,11 @@ int main(void) {
  assert(sample(0)==ESP_FAIL && !gpio_level && !battery_keep_alive_enabled);
  assert(sample(0)==ESP_OK && battery_keep_alive_enabled && battery_keep_alive_timer->active);
  assert(!critical_depth);
+ battery_gauge_tests();
  puts("PASS: battery KEY timing, charger debounce/errors, callback race, overlap and timer failures");
 }
 """
-    run('battery_keep_alive', pin + '\n' + mock + battery + checks)
+    run('battery_keep_alive', pin + '\n' + mock + battery + gauge_checks + checks)
 
 
 if __name__ == '__main__':
